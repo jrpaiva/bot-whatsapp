@@ -5,10 +5,13 @@ const qrcode = require('qrcode-terminal');
 const client = new Client({
     authStrategy: new LocalAuth(),
     puppeteer: {
-        // Removida a linha do executablePath para usar o Chrome baixado automaticamente
+        // Sem executablePath! O postinstall vai achar o Chrome sozinho.
         args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage']
     }
 });
+
+// O restante do seu código (client.on('qr', ...), client.on('ready', ...) e seus lembretes) continua igual aqui para baixo...
+
 
 
 // Exibe o QR Code desenhado diretamente na tela preta do Render

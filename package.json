@@ -4,6 +4,7 @@
   "description": "Bot de lembretes para multiplos grupos",
   "main": "index.js",
   "scripts": {
+    "postinstall": "npx puppeteer browsers install chrome",
     "start": "node index.js"
   },
   "dependencies": {
