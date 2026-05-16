@@ -1,0 +1,14 @@
+{
+  "name": "whatsapp-bot-lembretes",
+  "version": "1.0.0",
+  "description": "Bot de lembretes para multiplos grupos",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "node-cron": "^3.0.3",
+    "qrcode": "^1.5.4",
+    "whatsapp-web.js": "^1.26.0"
+  }
+}
