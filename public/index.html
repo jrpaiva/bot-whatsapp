@@ -40,6 +40,16 @@ body::before{content:"";position:fixed;inset:0;background-image:linear-gradient(
 .logs-box{height:260px;overflow:auto;background:#071018;border:1px solid var(--border);border-radius:18px;padding:14px}.log-entry{display:grid;grid-template-columns:72px 76px 1fr;gap:8px;font-size:.77rem;line-height:1.45}.log-time,.log-type{font-family:'Space Mono',monospace}.log-time{color:var(--muted)}.log-type.Sucesso{color:var(--green)}.log-type.Erro{color:var(--red)}.log-type.Aviso{color:var(--yellow)}.log-type.Bot{color:var(--blue)}.log-type.Cron{color:#d99cff}.log-type.Sessão{color:#9fe870}.log-type.Config{color:var(--yellow)}
 .ag-card{background:#071018;border:1px solid var(--border);border-radius:20px;padding:18px}.ag-card.active{border-color:#25d36680;box-shadow:0 0 0 4px var(--green-soft)}.days-grid{display:grid;grid-template-columns:repeat(7,1fr);gap:8px}.day-check input{display:none}.day-check span{display:flex;align-items:center;justify-content:center;min-height:40px;border:1px solid var(--border);border-radius:12px;color:var(--muted);font-weight:900;background:#0d1722;cursor:pointer}.day-check input:checked+span{background:var(--green);color:#05220f;border-color:var(--green)}
 .whatsapp-preview{background:#0b141a;border:1px solid var(--border);border-radius:22px;overflow:hidden}.wa-top{height:48px;background:#202c33;display:flex;align-items:center;gap:10px;padding:0 14px}.wa-avatar{width:30px;height:30px;border-radius:50%;background:#6b7c86;display:flex;align-items:center;justify-content:center;color:white}.wa-chat{min-height:190px;padding:18px;background-color:#0b141a;background-image:radial-gradient(#ffffff08 1px,transparent 1px);background-size:16px 16px}.wa-bubble{max-width:86%;margin-left:auto;background:#005c4b;color:#e9edef;border-radius:14px 0 14px 14px;padding:10px 12px;white-space:pre-wrap;font-size:.94rem;line-height:1.45;word-break:break-word}.wa-empty{color:#81929d;font-style:italic}.wa-time{text-align:right;color:#b7c8d0;font-size:.68rem;margin-top:6px}.modal-content{background:var(--panel);border:1px solid var(--border);border-radius:22px;color:var(--text)}.modal-header,.modal-footer{border-color:var(--border)}.toast-custom{position:fixed;right:24px;bottom:24px;z-index:2000;background:var(--green);color:#05220f;border-radius:14px;padding:12px 16px;font-weight:900;transform:translateY(80px);opacity:0;transition:.25s}.toast-custom.show{transform:translateY(0);opacity:1}.badge-soft{background:#132235;border:1px solid var(--border);color:var(--muted);border-radius:999px;padding:6px 10px;font-weight:800}
+
+.ag-card.collapsed .ag-body{display:none}
+.ag-summary{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:14px}
+.ag-summary-left{display:flex;align-items:center;gap:10px;min-width:0}
+.ag-group-title{font-weight:900;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:420px}
+.status-mini{display:inline-flex;align-items:center;gap:6px;border-radius:999px;padding:5px 10px;font-size:.8rem;font-weight:900;border:1px solid var(--border)}
+.status-mini.active{background:var(--green-soft);color:var(--green)}
+.status-mini.inactive{background:#ffd1661f;color:var(--yellow)}
+.filter-wrap{max-width:420px;width:100%}
+
 @media(max-width:768px){.app-shell{padding:14px}.days-grid{grid-template-columns:repeat(4,1fr)}.log-entry{grid-template-columns:62px 68px 1fr}.card-header-clean{align-items:flex-start;flex-direction:column}}
 </style>
 </head>
@@ -90,7 +100,13 @@ body::before{content:"";position:fixed;inset:0;background-image:linear-gradient(
         <h2 class="section-title">Agendamentos</h2>
         <div class="muted small mt-1">Selecione dias e horários diretamente em horário de Brasília. O cron é gerado automaticamente.</div>
       </div>
-      <div class="d-flex gap-2">
+      <div class="d-flex gap-2 flex-wrap align-items-center justify-content-end">
+        <div class="filter-wrap">
+          <div class="input-group">
+            <span class="input-group-text bg-transparent text-light border-secondary"><i class="bi bi-funnel"></i></span>
+            <input class="form-control" id="ag-filter" placeholder="Filtrar por grupo" oninput="renderAgs()">
+          </div>
+        </div>
         <button class="btn btn-soft" onclick="addAg()"><i class="bi bi-plus-lg"></i> Novo</button>
         <button class="btn btn-wa" onclick="saveConfig()"><i class="bi bi-save"></i> Salvar tudo</button>
       </div>
@@ -158,6 +174,7 @@ body::before{content:"";position:fixed;inset:0;background-image:linear-gradient(
 let config = { agendamentos: [] };
 let grupos = [];
 let lastLogs = [];
+const collapsedAgs = new Set();
 const dayLabels = [
   { id: 0, label: 'Dom' }, { id: 1, label: 'Seg' }, { id: 2, label: 'Ter' }, { id: 3, label: 'Qua' },
   { id: 4, label: 'Qui' }, { id: 5, label: 'Sex' }, { id: 6, label: 'Sáb' }
@@ -266,58 +283,104 @@ async function loadGrupos() {
   setTimeout(loadGrupos, 15000);
 }
 
+function getAgFilter() {
+  return (document.getElementById('ag-filter')?.value || '').trim().toLowerCase();
+}
+
 function renderAgs() {
   const list = document.getElementById('ag-list');
-  list.innerHTML = (config.agendamentos || []).map((agRaw, i) => {
-    const ag = normalizeAg(agRaw);
-    config.agendamentos[i] = ag;
+  const filter = getAgFilter();
+  const all = config.agendamentos || [];
+  const visible = all
+    .map((agRaw, i) => ({ ag: normalizeAg(agRaw), i }))
+    .filter(item => !filter || String(item.ag.grupo || '').toLowerCase().includes(filter));
+
+  visible.forEach(({ ag, i }) => config.agendamentos[i] = ag);
+
+  if (!visible.length) {
+    list.innerHTML = '<div class="muted small">Nenhum agendamento encontrado.</div>';
+    return;
+  }
+
+  list.innerHTML = visible.map(({ ag, i }) => {
+    const isCollapsed = collapsedAgs.has(ag.id);
     return `
-      <div class="ag-card ${ag.ativo ? 'active' : ''}" id="ag-${ag.id}">
-        <div class="row g-3">
-          <div class="col-lg-4">
-            <label class="form-label">Grupo</label>
-            <input class="form-control" type="text" value="${escapeHtml(ag.grupo)}" list="grupos-list" placeholder="Nome exato do grupo" oninput="updateAg(${i}, 'grupo', this.value)">
-          </div>
-          <div class="col-lg-3">
-            <label class="form-label">Horário de Brasília</label>
-            <input class="form-control" type="time" value="${escapeHtml(ag.horario)}" oninput="updateAg(${i}, 'horario', this.value)">
-          </div>
-          <div class="col-lg-3">
-            <label class="form-label">Status</label>
-            <select class="form-select" onchange="updateAg(${i}, 'ativo', this.value === 'true')">
-              <option value="false" ${!ag.ativo ? 'selected' : ''}>Inativo</option>
-              <option value="true" ${ag.ativo ? 'selected' : ''}>Ativo</option>
-            </select>
-          </div>
-          <div class="col-lg-2 d-flex align-items-end">
-            <button class="btn btn-danger-soft w-100" onclick="removeAg(${i})"><i class="bi bi-trash3"></i></button>
-          </div>
-          <div class="col-12">
-            <label class="form-label">Dias da semana</label>
-            <div class="days-grid">
-              ${dayLabels.map(d => `
-                <label class="day-check">
-                  <input type="checkbox" ${ag.diasSemana.includes(d.id) ? 'checked' : ''} onchange="toggleDay(${i}, ${d.id}, this.checked)">
-                  <span>${d.label}</span>
-                </label>
-              `).join('')}
+      <div class="ag-card ${ag.ativo ? 'active' : ''} ${isCollapsed ? 'collapsed' : ''}" id="ag-${ag.id}">
+        <div class="ag-summary">
+          <div class="ag-summary-left">
+            <button class="btn btn-soft btn-sm" onclick="toggleAgCollapse(${ag.id})" title="Expandir/Recolher">
+              <i class="bi ${isCollapsed ? 'bi-chevron-down' : 'bi-chevron-up'}"></i>
+            </button>
+            <div>
+              <div class="ag-group-title">${escapeHtml(ag.grupo || 'Grupo não definido')}</div>
+              <div class="muted small">${escapeHtml(ag.horario)} · ${escapeHtml(daysToText(ag.diasSemana))}</div>
             </div>
           </div>
-          <div class="col-lg-6">
-            <label class="form-label">Mensagem</label>
-            <textarea class="form-control" rows="6" placeholder="Mensagem a enviar" oninput="updateAg(${i}, 'mensagem', this.value); updateAgPreview(${i})">${escapeHtml(ag.mensagem)}</textarea>
-          </div>
-          <div class="col-lg-6">
-            <label class="form-label">Preview da mensagem</label>
-            <div class="whatsapp-preview">
-              <div class="wa-top"><div class="wa-avatar"><i class="bi bi-people-fill"></i></div><div><div class="fw-bold">${escapeHtml(ag.grupo || 'Grupo')}</div><div class="small muted">agendado às ${escapeHtml(ag.horario)}</div></div></div>
-              <div class="wa-chat"><div class="wa-bubble" id="ag-preview-${i}">${renderMessagePreview(ag.mensagem)}</div></div>
+          <span class="status-mini ${ag.ativo ? 'active' : 'inactive'}">
+            <i class="bi ${ag.ativo ? 'bi-circle-fill' : 'bi-exclamation-circle-fill'}"></i>
+            ${ag.ativo ? 'Ativo' : 'Inativo'}
+          </span>
+        </div>
+
+        <div class="ag-body">
+          <div class="row g-3">
+            <div class="col-lg-4">
+              <label class="form-label">Grupo</label>
+              <input class="form-control" type="text" value="${escapeHtml(ag.grupo)}" list="grupos-list" placeholder="Nome exato do grupo" oninput="updateAg(${i}, 'grupo', this.value)">
             </div>
-            <div class="mono muted small mt-2">Cron gerado: <span id="cron-${i}">${escapeHtml(ag.cron)}</span></div>
+            <div class="col-lg-3">
+              <label class="form-label">Horário de Brasília</label>
+              <input class="form-control" type="time" value="${escapeHtml(ag.horario)}" oninput="updateAg(${i}, 'horario', this.value)">
+            </div>
+            <div class="col-lg-3">
+              <label class="form-label">Status</label>
+              <select class="form-select" onchange="updateAg(${i}, 'ativo', this.value === 'true')">
+                <option value="false" ${!ag.ativo ? 'selected' : ''}>Inativo</option>
+                <option value="true" ${ag.ativo ? 'selected' : ''}>Ativo</option>
+              </select>
+            </div>
+            <div class="col-lg-2 d-flex align-items-end">
+              <button class="btn btn-danger-soft w-100" onclick="removeAg(${i})"><i class="bi bi-trash3"></i></button>
+            </div>
+            <div class="col-12">
+              <label class="form-label">Dias da semana</label>
+              <div class="days-grid">
+                ${dayLabels.map(d => `
+                  <label class="day-check">
+                    <input type="checkbox" ${ag.diasSemana.includes(d.id) ? 'checked' : ''} onchange="toggleDay(${i}, ${d.id}, this.checked)">
+                    <span>${d.label}</span>
+                  </label>
+                `).join('')}
+              </div>
+            </div>
+            <div class="col-lg-6">
+              <label class="form-label">Mensagem</label>
+              <textarea class="form-control" rows="6" placeholder="Mensagem a enviar" oninput="updateAg(${i}, 'mensagem', this.value); updateAgPreview(${i})">${escapeHtml(ag.mensagem)}</textarea>
+            </div>
+            <div class="col-lg-6">
+              <label class="form-label">Preview da mensagem</label>
+              <div class="whatsapp-preview">
+                <div class="wa-top"><div class="wa-avatar"><i class="bi bi-people-fill"></i></div><div><div class="fw-bold">${escapeHtml(ag.grupo || 'Grupo')}</div><div class="small muted">agendado às ${escapeHtml(ag.horario)}</div></div></div>
+                <div class="wa-chat"><div class="wa-bubble" id="ag-preview-${i}">${renderMessagePreview(ag.mensagem)}</div></div>
+              </div>
+              <div class="mono muted small mt-2">Cron gerado: <span id="cron-${i}">${escapeHtml(ag.cron)}</span></div>
+            </div>
           </div>
         </div>
       </div>`;
   }).join('');
+}
+
+function daysToText(days) {
+  const arr = Array.isArray(days) ? days : [];
+  if (arr.length === 7) return 'Todos os dias';
+  if (!arr.length) return 'Sem dias selecionados';
+  return arr.map(id => dayLabels.find(d => d.id === Number(id))?.label).filter(Boolean).join(', ');
+}
+
+function toggleAgCollapse(id) {
+  collapsedAgs.has(id) ? collapsedAgs.delete(id) : collapsedAgs.add(id);
+  renderAgs();
 }
 
 function renderMessagePreview(msg) {
@@ -332,6 +395,7 @@ function updateAg(i, key, val) {
   if (cronEl) cronEl.textContent = config.agendamentos[i].cron;
   const item = document.getElementById(`ag-${config.agendamentos[i].id}`);
   if (item && key === 'ativo') item.classList.toggle('active', val);
+  if (['ativo','horario','diasSemana'].includes(key)) renderAgs();
 }
 
 function toggleDay(i, day, checked) {
@@ -359,6 +423,8 @@ function removeAg(i) {
 async function saveConfig() {
   config.agendamentos = config.agendamentos.map(normalizeAg);
   await fetch('/api/config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(config) });
+  config.agendamentos.forEach(ag => collapsedAgs.add(ag.id));
+  renderAgs();
   showToast('Configurações salvas');
 }
 
@@ -414,12 +480,20 @@ async function sessionAction(action) {
   box.textContent = labels[action];
   box.classList.remove('d-none');
 
-  const r = await fetch(map[action], { method: 'POST' });
-  const d = await r.json().catch(() => ({ ok:false, msg:'Erro inesperado.' }));
+  try {
+    const r = await fetch(map[action], { method: 'POST' });
+    const raw = await r.text();
+    let d;
+    try { d = JSON.parse(raw); } catch { d = { ok:false, msg: raw || `HTTP ${r.status}` }; }
+    if (!r.ok && d.ok !== true) d.ok = false;
 
-  box.className = d.ok ? 'alert alert-success' : 'alert alert-danger';
-  box.textContent = d.msg || (d.ok ? 'Operação concluída.' : 'Falha na operação.');
-  if (d.ok) showToast(d.msg || 'Operação concluída');
+    box.className = d.ok ? 'alert alert-success' : 'alert alert-danger';
+    box.textContent = d.msg || (d.ok ? 'Operação concluída.' : `Falha na operação. HTTP ${r.status}`);
+    if (d.ok) showToast(d.msg || 'Operação concluída');
+  } catch (e) {
+    box.className = 'alert alert-danger';
+    box.textContent = `Falha de rede ou servidor indisponível: ${e.message}`;
+  }
 }
 
 pollStatus();

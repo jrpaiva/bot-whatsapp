@@ -11,7 +11,7 @@ const { createClient } = require('@supabase/supabase-js');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
-const AUTH_DIR = process.env.WWEBJS_AUTH_DIR || '/app/.wwebjs_auth';
+const AUTH_DIR = process.env.WWEBJS_AUTH_DIR || '/tmp/.wwebjs_auth';
 const CONFIG_FILE = path.join(AUTH_DIR, 'config.json');
 const BRASILIA_TZ = 'America/Sao_Paulo';
 
@@ -140,12 +140,35 @@ let scheduledJobs = {};
 let logs = [];
 let restarting = false;
 
-function addLog(type, msg) {
-    const entry = { type, msg, time: new Date().toLocaleTimeString('pt-BR', { timeZone: BRASILIA_TZ }) };
-    logs.unshift(entry);
-    if (logs.length > 150) logs.pop();
-    console.log(`[${type}] ${msg}`);
+function getErrorDetails(err) {
+    if (!err) return 'Erro desconhecido';
+    const parts = [];
+    if (err.message) parts.push(err.message);
+    if (err.status) parts.push(`status=${err.status}`);
+    if (err.code) parts.push(`code=${err.code}`);
+    if (err.name) parts.push(`name=${err.name}`);
+    if (err.details) parts.push(`details=${err.details}`);
+    if (err.hint) parts.push(`hint=${err.hint}`);
+    return parts.join(' | ') || String(err);
 }
+
+function addLog(type, msg, extra = null) {
+    const fullMsg = extra ? `${msg} — ${extra}` : msg;
+    const entry = { type, msg: fullMsg, time: new Date().toLocaleTimeString('pt-BR', { timeZone: BRASILIA_TZ }) };
+    logs.unshift(entry);
+    if (logs.length > 300) logs.pop();
+    console.log(`[${type}] ${fullMsg}`);
+}
+
+process.on('uncaughtException', (err) => {
+    addLog('Erro', 'Exceção não tratada', getErrorDetails(err));
+    console.error(err);
+});
+
+process.on('unhandledRejection', (err) => {
+    addLog('Erro', 'Promise rejeitada sem tratamento', getErrorDetails(err));
+    console.error(err);
+});
 
 function scheduleAll() {
     Object.values(scheduledJobs).forEach(j => j.stop());
@@ -161,7 +184,7 @@ function scheduleAll() {
             }, { timezone: BRASILIA_TZ });
             addLog('Cron', `Agendado: "${ag.grupo}" às ${ag.horario} [Brasília]`);
         } catch (e) {
-            addLog('Erro', `Cron inválido para agendamento ${ag.id}: ${e.message}`);
+            addLog('Erro', `Cron inválido para agendamento ${ag.id}`, getErrorDetails(e));
         }
     });
 }
@@ -182,8 +205,8 @@ async function enviarLembrete(grupo, mensagem) {
         addLog('Aviso', `Grupo "${grupo}" não encontrado.`);
         return { ok: false, msg: `Grupo "${grupo}" não encontrado.` };
     } catch (e) {
-        addLog('Erro', `Falha ao enviar: ${e.message}`);
-        return { ok: false, msg: e.message };
+        addLog('Erro', 'Falha ao enviar mensagem', getErrorDetails(e));
+        return { ok: false, msg: getErrorDetails(e) };
     }
 }
 
@@ -194,7 +217,7 @@ function zipDirectory(sourceDir, outPath) {
         const output = fs.createWriteStream(outPath);
         const archive = archiver('zip', { zlib: { level: 9 } });
 
-        output.on('close', resolve);
+        output.on('close', () => resolve(archive.pointer()));
         archive.on('error', reject);
         archive.pipe(output);
         archive.directory(sourceDir, false);
@@ -221,13 +244,22 @@ function requireSupabase() {
 async function saveSessionToSupabase() {
     requireSupabase();
     ensureDir(AUTH_DIR);
+
+    if (!fs.existsSync(AUTH_DIR)) {
+        throw new Error(`Pasta de sessão não encontrada: ${AUTH_DIR}`);
+    }
+
     const tmpFile = path.join('/tmp', `wwebjs_auth_${Date.now()}.zip`);
-    await zipDirectory(AUTH_DIR, tmpFile);
-    const buffer = await fs.promises.readFile(tmpFile);
+    addLog('Sessão', `Compactando sessão local: ${AUTH_DIR}`);
+    const zipBytes = await zipDirectory(AUTH_DIR, tmpFile);
+    addLog('Sessão', `ZIP criado: ${(zipBytes / 1024 / 1024).toFixed(2)} MB`);
+
+    const fileStream = fs.createReadStream(tmpFile);
+    addLog('Sessão', `Enviando para Supabase: ${SUPABASE_BUCKET}/${SUPABASE_SESSION_PATH}`);
 
     const { error } = await supabase.storage
         .from(SUPABASE_BUCKET)
-        .upload(SUPABASE_SESSION_PATH, buffer, {
+        .upload(SUPABASE_SESSION_PATH, fileStream, {
             contentType: 'application/zip',
             upsert: true
         });
@@ -238,6 +270,7 @@ async function saveSessionToSupabase() {
 
 async function deleteSessionFromSupabase() {
     requireSupabase();
+    addLog('Sessão', `Excluindo do Supabase: ${SUPABASE_BUCKET}/${SUPABASE_SESSION_PATH}`);
     const { error } = await supabase.storage.from(SUPABASE_BUCKET).remove([SUPABASE_SESSION_PATH]);
     if (error) throw error;
 }
@@ -245,6 +278,7 @@ async function deleteSessionFromSupabase() {
 async function restoreSessionFromSupabase() {
     requireSupabase();
     const tmpFile = path.join('/tmp', `wwebjs_restore_${Date.now()}.zip`);
+    addLog('Sessão', `Baixando do Supabase: ${SUPABASE_BUCKET}/${SUPABASE_SESSION_PATH}`);
     const { data, error } = await supabase.storage.from(SUPABASE_BUCKET).download(SUPABASE_SESSION_PATH);
     if (error) throw error;
 
@@ -252,6 +286,7 @@ async function restoreSessionFromSupabase() {
     await fs.promises.writeFile(tmpFile, buffer);
 
     await stopBot();
+    addLog('Sessão', `Extraindo sessão em: ${AUTH_DIR}`);
     await extractZip(tmpFile, AUTH_DIR);
     await fs.promises.rm(tmpFile, { force: true });
 
@@ -313,6 +348,7 @@ app.get('/api/grupos', async (req, res) => {
         const grupos = chats.filter(c => c.isGroup).map(c => c.name).sort((a, b) => a.localeCompare(b));
         res.json(grupos);
     } catch (e) {
+        addLog('Erro', 'Erro ao listar grupos', getErrorDetails(e));
         res.json([]);
     }
 });
@@ -323,8 +359,8 @@ app.post('/api/session/save', async (req, res) => {
         addLog('Sessão', `Sessão salva no Supabase: ${SUPABASE_BUCKET}/${SUPABASE_SESSION_PATH}`);
         res.json({ ok: true, msg: 'Sessão salva no Supabase.' });
     } catch (e) {
-        addLog('Erro', `Erro ao salvar sessão: ${e.message}`);
-        res.status(500).json({ ok: false, msg: e.message });
+        addLog('Erro', 'Erro ao salvar sessão', getErrorDetails(e));
+        res.status(500).json({ ok: false, msg: getErrorDetails(e) });
     }
 });
 
@@ -334,8 +370,8 @@ app.post('/api/session/delete', async (req, res) => {
         addLog('Sessão', 'Sessão excluída do Supabase.');
         res.json({ ok: true, msg: 'Sessão excluída do Supabase.' });
     } catch (e) {
-        addLog('Erro', `Erro ao excluir sessão: ${e.message}`);
-        res.status(500).json({ ok: false, msg: e.message });
+        addLog('Erro', 'Erro ao excluir sessão', getErrorDetails(e));
+        res.status(500).json({ ok: false, msg: getErrorDetails(e) });
     }
 });
 
@@ -348,13 +384,13 @@ app.post('/api/session/restore', async (req, res) => {
                 await restoreSessionFromSupabase();
                 addLog('Sessão', 'Sessão restaurada. Bot reiniciado.');
             } catch (e) {
-                addLog('Erro', `Erro ao restaurar sessão: ${e.message}`);
+                addLog('Erro', 'Erro ao restaurar sessão', getErrorDetails(e));
                 botStatus = 'Erro ao restaurar sessão';
             }
         }, 500);
     } catch (e) {
-        addLog('Erro', `Erro ao restaurar sessão: ${e.message}`);
-        res.status(500).json({ ok: false, msg: e.message });
+        addLog('Erro', 'Erro ao restaurar sessão', getErrorDetails(e));
+        res.status(500).json({ ok: false, msg: getErrorDetails(e) });
     }
 });
 
@@ -418,7 +454,13 @@ async function iniciarBot() {
         if (!restarting) setTimeout(() => iniciarBot(), 5000);
     });
 
-    clientInstance.initialize();
+    clientInstance.initialize().catch((e) => {
+        addLog('Erro', 'Erro ao inicializar WhatsApp', getErrorDetails(e));
+        botStatus = 'Erro ao inicializar WhatsApp';
+        botConnected = false;
+        clientInstance = null;
+        if (!restarting) setTimeout(() => iniciarBot(), 8000);
+    });
 }
 
 iniciarBot();
