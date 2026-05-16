@@ -1,0 +1,447 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>WA Bot — Painel</title>
+<link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Syne:wght@400;700;800&display=swap" rel="stylesheet"/>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --bg:#080c10;
+  --panel:#0d1117;
+  --border:#1e2d3d;
+  --green:#00e676;
+  --green-dim:#00e67622;
+  --yellow:#ffd600;
+  --red:#ff1744;
+  --blue:#40c4ff;
+  --text:#c9d1d9;
+  --text-dim:#8b949e;
+  --accent:#00e676;
+}
+body{background:var(--bg);color:var(--text);font-family:'Syne',sans-serif;min-height:100vh;overflow-x:hidden}
+
+/* grid noise overlay */
+body::before{content:'';position:fixed;inset:0;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='4' height='4'%3E%3Crect width='1' height='1' fill='%23ffffff08'/%3E%3C/svg%3E");pointer-events:none;z-index:0}
+
+.app{position:relative;z-index:1;display:grid;grid-template-rows:auto 1fr;min-height:100vh}
+
+/* ── HEADER ── */
+header{
+  display:flex;align-items:center;justify-content:space-between;
+  padding:16px 32px;border-bottom:1px solid var(--border);
+  background:var(--panel);
+}
+.logo{display:flex;align-items:center;gap:12px}
+.logo-icon{width:36px;height:36px;background:var(--green);border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:18px}
+.logo-text{font-family:'Space Mono',monospace;font-size:13px;color:var(--text-dim)}
+.logo-text strong{display:block;font-size:16px;color:var(--text);font-family:'Syne',sans-serif;font-weight:800}
+.status-pill{display:flex;align-items:center;gap:8px;padding:6px 14px;border-radius:20px;border:1px solid var(--border);font-size:12px;font-family:'Space Mono',monospace}
+.status-dot{width:8px;height:8px;border-radius:50%;background:var(--text-dim);transition:.3s}
+.status-pill.connected .status-dot{background:var(--green);box-shadow:0 0 8px var(--green);animation:pulse 2s infinite}
+.status-pill.connected{border-color:var(--green);color:var(--green)}
+.status-pill.qr{border-color:var(--yellow);color:var(--yellow)}
+.status-pill.qr .status-dot{background:var(--yellow);box-shadow:0 0 8px var(--yellow)}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
+
+/* ── MAIN LAYOUT ── */
+main{display:grid;grid-template-columns:1fr 1fr;grid-template-rows:auto auto auto;gap:1px;background:var(--border)}
+
+.panel{background:var(--panel);padding:28px 32px}
+.panel-header{display:flex;align-items:center;gap:10px;margin-bottom:24px}
+.panel-header h2{font-size:13px;font-weight:800;text-transform:uppercase;letter-spacing:.12em;color:var(--text-dim)}
+.panel-num{font-family:'Space Mono',monospace;font-size:11px;color:var(--accent);opacity:.7}
+.panel.full{grid-column:1/-1}
+
+/* ── QR PANEL ── */
+#qr-panel{display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:220px;gap:16px}
+#qr-img{width:200px;height:200px;border-radius:12px;border:2px solid var(--green);display:none}
+.qr-placeholder{width:200px;height:200px;border:2px dashed var(--border);border-radius:12px;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:8px;color:var(--text-dim)}
+.qr-placeholder .icon{font-size:40px;opacity:.3}
+.qr-placeholder p{font-size:12px;font-family:'Space Mono',monospace;text-align:center}
+#connected-state{display:none;flex-direction:column;align-items:center;gap:12px;text-align:center}
+#connected-state .big-check{font-size:56px}
+#connected-state p{font-size:13px;color:var(--text-dim);font-family:'Space Mono',monospace}
+
+/* ── LOGS ── */
+#logs-box{background:#060a0e;border-radius:8px;height:180px;overflow-y:auto;padding:12px;font-family:'Space Mono',monospace;font-size:11px;display:flex;flex-direction:column;gap:4px}
+#logs-box::-webkit-scrollbar{width:4px}
+#logs-box::-webkit-scrollbar-track{background:transparent}
+#logs-box::-webkit-scrollbar-thumb{background:var(--border);border-radius:2px}
+.log-entry{display:flex;gap:8px;line-height:1.4}
+.log-time{color:var(--text-dim);min-width:65px;flex-shrink:0}
+.log-type{min-width:55px;flex-shrink:0}
+.log-type.Sucesso{color:var(--green)}
+.log-type.Erro{color:var(--red)}
+.log-type.Aviso{color:var(--yellow)}
+.log-type.Bot{color:var(--blue)}
+.log-type.Cron{color:#ce93d8}
+.log-msg{color:var(--text)}
+
+/* ── FORMS ── */
+label{display:block;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.1em;color:var(--text-dim);margin-bottom:6px}
+input,textarea,select{
+  width:100%;background:#060a0e;border:1px solid var(--border);color:var(--text);
+  padding:10px 14px;border-radius:6px;font-family:'Space Mono',monospace;font-size:12px;
+  outline:none;transition:.2s;resize:none
+}
+input:focus,textarea:focus,select:focus{border-color:var(--accent);box-shadow:0 0 0 3px var(--green-dim)}
+.field{margin-bottom:16px}
+
+/* ── AGENDAMENTOS ── */
+.ag-list{display:flex;flex-direction:column;gap:12px}
+.ag-item{background:#060a0e;border:1px solid var(--border);border-radius:10px;padding:16px;position:relative;transition:.2s}
+.ag-item.active{border-color:var(--green-dim)}
+.ag-top{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:10px}
+.ag-bottom{display:grid;grid-template-columns:1fr auto auto;gap:10px;align-items:end}
+.toggle{display:flex;align-items:center;gap:8px;cursor:pointer;font-size:12px;color:var(--text-dim)}
+.toggle input{display:none}
+.toggle-track{width:36px;height:20px;background:var(--border);border-radius:10px;position:relative;transition:.3s}
+.toggle input:checked+.toggle-track{background:var(--green)}
+.toggle-thumb{position:absolute;top:3px;left:3px;width:14px;height:14px;background:#fff;border-radius:50%;transition:.3s}
+.toggle input:checked~.toggle-track .toggle-thumb,
+.toggle input:checked+.toggle-track .toggle-thumb{left:19px}
+
+/* ── BUTTONS ── */
+btn,button,.btn{
+  display:inline-flex;align-items:center;justify-content:center;gap:8px;
+  padding:10px 20px;border-radius:6px;border:none;cursor:pointer;
+  font-family:'Syne',sans-serif;font-weight:700;font-size:13px;
+  transition:.2s;white-space:nowrap
+}
+.btn-primary{background:var(--green);color:#000}
+.btn-primary:hover{background:#69f0ae;transform:translateY(-1px)}
+.btn-danger{background:transparent;color:var(--red);border:1px solid var(--red)}
+.btn-danger:hover{background:var(--red);color:#fff}
+.btn-ghost{background:transparent;color:var(--text-dim);border:1px solid var(--border)}
+.btn-ghost:hover{border-color:var(--accent);color:var(--accent)}
+.btn-sm{padding:7px 14px;font-size:12px}
+.btn-send{background:var(--green);color:#000;width:100%;padding:14px;font-size:14px;border-radius:8px;border:none;cursor:pointer;font-family:'Syne',sans-serif;font-weight:800;letter-spacing:.05em;margin-top:4px;transition:.2s}
+.btn-send:hover{background:#69f0ae;transform:translateY(-1px)}
+.btn-send:disabled{opacity:.4;cursor:not-allowed;transform:none}
+
+.actions{display:flex;gap:8px;margin-top:16px;justify-content:flex-end}
+
+/* ── ENVIO MANUAL ── */
+#send-result{font-size:12px;font-family:'Space Mono',monospace;padding:10px;border-radius:6px;display:none;margin-top:10px}
+#send-result.ok{background:var(--green-dim);color:var(--green);border:1px solid var(--green)}
+#send-result.err{background:#ff174422;color:var(--red);border:1px solid var(--red)}
+
+.divider{height:1px;background:var(--border);margin:20px 0}
+
+/* ── GRUPOS SUGESTÃO ── */
+datalist{}
+
+/* ── SAVED TOAST ── */
+#toast{position:fixed;bottom:32px;right:32px;background:var(--green);color:#000;padding:12px 24px;border-radius:8px;font-weight:700;font-size:13px;transform:translateY(80px);opacity:0;transition:.3s;z-index:999}
+#toast.show{transform:translateY(0);opacity:1}
+
+/* ── RESPONSIVE ── */
+@media(max-width:860px){main{grid-template-columns:1fr}.panel.full{grid-column:1}}
+</style>
+</head>
+<body>
+<div class="app">
+
+<header>
+  <div class="logo">
+    <div class="logo-icon">🤖</div>
+    <div>
+      <strong>WA Bot</strong>
+      <span class="logo-text">Painel de Controle</span>
+    </div>
+  </div>
+  <div class="status-pill" id="status-pill">
+    <div class="status-dot"></div>
+    <span id="status-text">Conectando...</span>
+  </div>
+</header>
+
+<main>
+
+  <!-- QR / Status -->
+  <div class="panel">
+    <div class="panel-header">
+      <span class="panel-num">01</span>
+      <h2>Conexão WhatsApp</h2>
+    </div>
+    <div id="qr-panel">
+      <div class="qr-placeholder" id="qr-placeholder">
+        <div class="icon">📱</div>
+        <p>Aguardando<br>QR Code...</p>
+      </div>
+      <img id="qr-img" src="" alt="QR Code"/>
+      <div id="connected-state">
+        <div class="big-check">✅</div>
+        <p>Bot conectado<br>e funcionando</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- Logs -->
+  <div class="panel">
+    <div class="panel-header">
+      <span class="panel-num">02</span>
+      <h2>Logs em tempo real</h2>
+    </div>
+    <div id="logs-box">
+      <div class="log-entry"><span class="log-time">--:--:--</span><span class="log-type">Info</span><span class="log-msg">Aguardando conexão...</span></div>
+    </div>
+  </div>
+
+  <!-- Agendamentos -->
+  <div class="panel full">
+    <div class="panel-header">
+      <span class="panel-num">03</span>
+      <h2>Agendamentos</h2>
+    </div>
+
+    <div class="ag-list" id="ag-list"></div>
+
+    <div class="actions">
+      <button class="btn btn-ghost btn-sm" onclick="addAg()">+ Novo agendamento</button>
+      <button class="btn btn-primary btn-sm" onclick="saveConfig()">💾 Salvar tudo</button>
+    </div>
+  </div>
+
+  <!-- Envio manual -->
+  <div class="panel full">
+    <div class="panel-header">
+      <span class="panel-num">04</span>
+      <h2>Envio Manual</h2>
+    </div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:24px">
+      <div>
+        <div class="field">
+          <label>Grupo de destino</label>
+          <input type="text" id="manual-grupo" placeholder="Nome exato do grupo..." list="grupos-list"/>
+          <datalist id="grupos-list"></datalist>
+        </div>
+        <div class="field">
+          <label>Mensagem</label>
+          <textarea id="manual-msg" rows="4" placeholder="Digite sua mensagem aqui..."></textarea>
+        </div>
+        <button class="btn-send" id="btn-send" onclick="enviarManual()">
+          ⚡ Enviar agora
+        </button>
+        <div id="send-result"></div>
+      </div>
+      <div style="background:#060a0e;border-radius:10px;padding:20px;border:1px solid var(--border)">
+        <label style="margin-bottom:12px;display:block">Preview da mensagem</label>
+        <div id="preview" style="font-size:13px;color:var(--text-dim);font-family:'Space Mono',monospace;white-space:pre-wrap;min-height:80px">
+          <span style="opacity:.4">A mensagem aparecerá aqui...</span>
+        </div>
+        <div class="divider"></div>
+        <p style="font-size:11px;color:var(--text-dim);font-family:'Space Mono',monospace">
+          💡 Use emojis e quebras de linha normalmente.<br>
+          A mensagem será enviada exatamente como digitada.
+        </p>
+      </div>
+    </div>
+  </div>
+
+</main>
+</div>
+
+<div id="toast">✓ Salvo com sucesso!</div>
+
+<datalist id="grupos-list"></datalist>
+
+<script>
+let config = { agendamentos: [] };
+let grupos = [];
+
+// ── Poll status ──────────────────────────────────────────────────────────
+async function pollStatus() {
+  try {
+    const r = await fetch('/api/status');
+    const d = await r.json();
+    updateStatus(d);
+  } catch(e){}
+  setTimeout(pollStatus, 3000);
+}
+
+function updateStatus(d) {
+  const pill = document.getElementById('status-pill');
+  const txt = document.getElementById('status-text');
+  const qrImg = document.getElementById('qr-img');
+  const qrPh = document.getElementById('qr-placeholder');
+  const connected = document.getElementById('connected-state');
+
+  if (d.connected) {
+    pill.className = 'status-pill connected';
+    txt.textContent = 'Conectado';
+    qrImg.style.display = 'none';
+    qrPh.style.display = 'none';
+    connected.style.display = 'flex';
+  } else if (d.qr) {
+    pill.className = 'status-pill qr';
+    txt.textContent = 'Aguardando QR';
+    qrImg.src = d.qr;
+    qrImg.style.display = 'block';
+    qrPh.style.display = 'none';
+    connected.style.display = 'none';
+  } else {
+    pill.className = 'status-pill';
+    txt.textContent = d.status || 'Inicializando...';
+    qrImg.style.display = 'none';
+    qrPh.style.display = 'flex';
+    connected.style.display = 'none';
+  }
+}
+
+// ── Poll logs ─────────────────────────────────────────────────────────────
+async function pollLogs() {
+  try {
+    const r = await fetch('/api/logs');
+    const logs = await r.json();
+    const box = document.getElementById('logs-box');
+    box.innerHTML = logs.map(l => `
+      <div class="log-entry">
+        <span class="log-time">${l.time}</span>
+        <span class="log-type ${l.type}">${l.type}</span>
+        <span class="log-msg">${l.msg}</span>
+      </div>
+    `).join('') || '<div class="log-entry"><span class="log-msg" style="color:var(--text-dim)">Sem logs ainda...</span></div>';
+  } catch(e){}
+  setTimeout(pollLogs, 3000);
+}
+
+// ── Load config ───────────────────────────────────────────────────────────
+async function loadConfig() {
+  const r = await fetch('/api/config');
+  config = await r.json();
+  renderAgs();
+}
+
+async function loadGrupos() {
+  try {
+    const r = await fetch('/api/grupos');
+    grupos = await r.json();
+    const dl = document.getElementById('grupos-list');
+    dl.innerHTML = grupos.map(g => `<option value="${g}">`).join('');
+  } catch(e){}
+  setTimeout(loadGrupos, 15000);
+}
+
+// ── Render agendamentos ───────────────────────────────────────────────────
+function renderAgs() {
+  const list = document.getElementById('ag-list');
+  list.innerHTML = config.agendamentos.map((ag, i) => `
+    <div class="ag-item ${ag.ativo ? 'active' : ''}" id="ag-${ag.id}">
+      <div class="ag-top">
+        <div class="field" style="margin:0">
+          <label>Grupo</label>
+          <input type="text" value="${ag.grupo}" list="grupos-list"
+            placeholder="Nome exato do grupo..."
+            onchange="updateAg(${i}, 'grupo', this.value)"/>
+        </div>
+        <div class="field" style="margin:0">
+          <label>Expressão Cron</label>
+          <input type="text" value="${ag.cron}"
+            placeholder="0 12 * * 1-3"
+            onchange="updateAg(${i}, 'cron', this.value)"/>
+        </div>
+      </div>
+      <div class="field" style="margin-bottom:12px">
+        <label>Mensagem</label>
+        <textarea rows="2" onchange="updateAg(${i}, 'mensagem', this.value)"
+          placeholder="Mensagem a enviar...">${ag.mensagem}</textarea>
+      </div>
+      <div style="display:flex;align-items:center;justify-content:space-between">
+        <label class="toggle">
+          <input type="checkbox" ${ag.ativo ? 'checked' : ''} onchange="updateAg(${i}, 'ativo', this.checked)">
+          <div class="toggle-track"><div class="toggle-thumb"></div></div>
+          <span style="margin-left:4px">${ag.ativo ? 'Ativo' : 'Inativo'}</span>
+        </label>
+        <button class="btn btn-danger btn-sm" onclick="removeAg(${i})">🗑 Remover</button>
+      </div>
+    </div>
+  `).join('');
+}
+
+function updateAg(i, key, val) {
+  config.agendamentos[i][key] = val;
+  const item = document.getElementById(`ag-${config.agendamentos[i].id}`);
+  if (key === 'ativo') {
+    item.classList.toggle('active', val);
+    item.querySelector('.toggle span').textContent = val ? 'Ativo' : 'Inativo';
+  }
+}
+
+function addAg() {
+  const id = Date.now();
+  config.agendamentos.push({ id, grupo: '', mensagem: '', cron: '0 12 * * 1-3', ativo: false });
+  renderAgs();
+}
+
+function removeAg(i) {
+  config.agendamentos.splice(i, 1);
+  renderAgs();
+}
+
+async function saveConfig() {
+  await fetch('/api/config', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(config)
+  });
+  const toast = document.getElementById('toast');
+  toast.classList.add('show');
+  setTimeout(() => toast.classList.remove('show'), 2500);
+}
+
+// ── Envio manual ──────────────────────────────────────────────────────────
+document.getElementById('manual-msg').addEventListener('input', function() {
+  const prev = document.getElementById('preview');
+  prev.textContent = this.value || '';
+  if (!this.value) prev.innerHTML = '<span style="opacity:.4">A mensagem aparecerá aqui...</span>';
+});
+
+async function enviarManual() {
+  const grupo = document.getElementById('manual-grupo').value.trim();
+  const mensagem = document.getElementById('manual-msg').value.trim();
+  const result = document.getElementById('send-result');
+  const btn = document.getElementById('btn-send');
+
+  if (!grupo || !mensagem) {
+    result.className = 'err';
+    result.style.display = 'block';
+    result.textContent = '⚠ Preencha o grupo e a mensagem.';
+    return;
+  }
+
+  btn.disabled = true;
+  btn.textContent = 'Enviando...';
+
+  const r = await fetch('/api/enviar', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ grupo, mensagem })
+  });
+  const d = await r.json();
+
+  result.style.display = 'block';
+  if (d.ok) {
+    result.className = 'ok';
+    result.textContent = '✓ Mensagem enviada com sucesso!';
+    document.getElementById('manual-msg').value = '';
+    document.getElementById('preview').innerHTML = '<span style="opacity:.4">A mensagem aparecerá aqui...</span>';
+  } else {
+    result.className = 'err';
+    result.textContent = '✗ ' + (d.msg || 'Erro ao enviar.');
+  }
+
+  btn.disabled = false;
+  btn.textContent = '⚡ Enviar agora';
+}
+
+// ── Init ──────────────────────────────────────────────────────────────────
+pollStatus();
+pollLogs();
+loadConfig();
+loadGrupos();
+</script>
+</body>
+</html>
