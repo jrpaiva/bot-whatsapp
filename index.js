@@ -301,19 +301,23 @@ async function saveConfigToSupabase() {
 
 async function restoreConfigFromSupabase() {
     if (!supabase) {
-        addLog('Config', 'Supabase não configurado. Usando config local.');
+        addLog('Config', 'Supabase não configurado. Agendamentos não foram restaurados.');
         return false;
     }
 
     try {
-        addLog('Config', `Baixando config do Supabase: ${SUPABASE_BUCKET}/${SUPABASE_CONFIG_PATH}`);
+        addLog('Config', `Tentando restaurar agendamentos do Supabase: ${SUPABASE_BUCKET}/${SUPABASE_CONFIG_PATH}`);
 
         const { data, error } = await supabase.storage
             .from(SUPABASE_BUCKET)
             .download(SUPABASE_CONFIG_PATH);
 
         if (error) {
-            addLog('Config', 'Nenhuma config remota encontrada. Usando config local.', getErrorDetails(error));
+            addLog(
+                'Config',
+                `Nenhum arquivo remoto de agendamentos encontrado em "${SUPABASE_CONFIG_PATH}". Usando config local.`,
+                getErrorDetails(error)
+            );
             return false;
         }
 
@@ -325,11 +329,27 @@ async function restoreConfigFromSupabase() {
 
         config = remoteConfig;
 
-        addLog('Config', `Config restaurada do Supabase com ${config.agendamentos.length} agendamento(s).`);
+        const total = config.agendamentos.length;
+        const ativos = config.agendamentos.filter(a => a.ativo).length;
+        const inativos = total - ativos;
+
+        addLog(
+            'Config',
+            `Agendamentos restaurados do Supabase com sucesso. Total=${total}, ativos=${ativos}, inativos=${inativos}.`
+        );
+
+        if (total > 0) {
+            config.agendamentos.forEach((ag, index) => {
+                addLog(
+                    'Config',
+                    `Restaurado #${index + 1}: grupo="${ag.grupo || 'sem grupo'}", horário="${ag.horario || 'sem horário'}", ativo=${ag.ativo ? 'sim' : 'não'}, cron="${ag.cron || 'sem cron'}"`
+                );
+            });
+        }
 
         return true;
     } catch (e) {
-        addLog('Erro', 'Erro ao restaurar config do Supabase', getErrorDetails(e));
+        addLog('Erro', 'Erro ao restaurar agendamentos do Supabase', getErrorDetails(e));
         return false;
     }
 }
