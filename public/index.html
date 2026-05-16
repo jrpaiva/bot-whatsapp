@@ -401,11 +401,18 @@ function renderMessagePreview(msg) {
 function updateAg(i, key, val) {
   config.agendamentos[i][key] = val;
   config.agendamentos[i] = normalizeAg(config.agendamentos[i]);
+
   const cronEl = document.getElementById(`cron-${i}`);
   if (cronEl) cronEl.textContent = config.agendamentos[i].cron;
+
   const item = document.getElementById(`ag-${config.agendamentos[i].id}`);
   if (item && key === 'ativo') item.classList.toggle('active', val);
-  if (['ativo','horario','diasSemana'].includes(key)) renderAgs();
+
+  // Não renderiza novamente quando altera o horário,
+  // porque isso recria o input e tira o foco durante a digitação.
+  if (['ativo', 'diasSemana'].includes(key)) {
+    renderAgs();
+  }
 }
 
 function toggleDay(i, day, checked) {
