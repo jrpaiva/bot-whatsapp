@@ -1,0 +1,20 @@
+services:
+  - type: web
+    name: bot-whatsapp
+    env: node
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    envVars:
+      - key: WWEBJS_AUTH_DIR
+        value: /tmp/.wwebjs_auth
+      - key: WWEBJS_READY_WAIT_MS
+        value: 45000
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: SUPABASE_BUCKET
+        value: whatsapp-sessions
+      - key: SUPABASE_SESSION_PATH
+        value: wwebjs_auth.zip

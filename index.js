@@ -14,6 +14,8 @@ const PORT = process.env.PORT || 3000;
 const AUTH_DIR = process.env.WWEBJS_AUTH_DIR || '/tmp/.wwebjs_auth';
 const CONFIG_FILE = path.join(AUTH_DIR, 'config.json');
 const BRASILIA_TZ = 'America/Sao_Paulo';
+const READY_WAIT_MS = Number(process.env.WWEBJS_READY_WAIT_MS || 45000);
+const STARTED_AT = new Date();
 
 const SUPABASE_URL = process.env.SUPABASE_URL || '';
 const SUPABASE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY || '';
@@ -134,11 +136,17 @@ function saveConfig(cfg) {
 let config = loadConfig();
 let qrCodeDataURL = null;
 let botStatus = 'Inicializando...';
+let botState = 'starting';
 let botConnected = false;
 let clientInstance = null;
 let scheduledJobs = {};
 let logs = [];
 let restarting = false;
+
+function setBotState(state, status) {
+    botState = state;
+    botStatus = status;
+}
 
 function getErrorDetails(err) {
     if (!err) return 'Erro desconhecido';
@@ -189,10 +197,35 @@ function scheduleAll() {
     });
 }
 
+
+function wait(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+async function waitUntilReady(timeoutMs = READY_WAIT_MS) {
+    if (botConnected && clientInstance) return true;
+    const started = Date.now();
+    while (Date.now() - started < timeoutMs) {
+        if (botConnected && clientInstance) return true;
+        if (!clientInstance || botState === 'qr' || botState === 'error' || botState === 'auth_failure' || botState === 'disconnected') return false;
+        await wait(1000);
+    }
+    return botConnected && clientInstance;
+}
+
 async function enviarLembrete(grupo, mensagem) {
     if (!clientInstance || !botConnected) {
-        addLog('Erro', 'Bot não conectado.');
-        return { ok: false, msg: 'Bot não conectado.' };
+        if (clientInstance && ['starting', 'connecting', 'authenticated', 'restoring'].includes(botState)) {
+            addLog('Info', `Bot ainda não está pronto. Aguardando até ${Math.round(READY_WAIT_MS / 1000)}s antes de enviar...`);
+            const ready = await waitUntilReady();
+            if (!ready) {
+                addLog('Erro', `Bot não conectou a tempo. Estado atual: ${botStatus}`);
+                return { ok: false, msg: `Bot ainda não está conectado. Estado atual: ${botStatus}` };
+            }
+        } else {
+            addLog('Erro', `Bot não conectado. Estado atual: ${botStatus}`);
+            return { ok: false, msg: `Bot não conectado. Estado atual: ${botStatus}` };
+        }
     }
     try {
         const chats = await clientInstance.getChats();
@@ -277,6 +310,8 @@ async function deleteSessionFromSupabase() {
 
 async function restoreSessionFromSupabase() {
     requireSupabase();
+    restarting = true;
+    setBotState('restoring', 'Restaurando sessão...');
     const tmpFile = path.join('/tmp', `wwebjs_restore_${Date.now()}.zip`);
     addLog('Sessão', `Baixando do Supabase: ${SUPABASE_BUCKET}/${SUPABASE_SESSION_PATH}`);
     const { data, error } = await supabase.storage.from(SUPABASE_BUCKET).download(SUPABASE_SESSION_PATH);
@@ -285,38 +320,71 @@ async function restoreSessionFromSupabase() {
     const buffer = Buffer.from(await data.arrayBuffer());
     await fs.promises.writeFile(tmpFile, buffer);
 
-    await stopBot();
+    await stopBot(true);
     addLog('Sessão', `Extraindo sessão em: ${AUTH_DIR}`);
     await extractZip(tmpFile, AUTH_DIR);
     await fs.promises.rm(tmpFile, { force: true });
 
     config = loadConfig();
+    setBotState('connecting', 'Sessão restaurada. Conectando WhatsApp...');
     await iniciarBot();
 }
 
-async function stopBot() {
+async function stopBot(keepRestarting = false) {
     restarting = true;
+    setBotState('restarting', 'Reiniciando...');
     Object.values(scheduledJobs).forEach(j => j.stop());
     scheduledJobs = {};
 
     if (clientInstance) {
-        try { await clientInstance.destroy(); } catch (e) {}
+        try {
+            await clientInstance.destroy();
+        } catch (e) {
+            addLog('Aviso', 'Erro ao destruir client anterior', getErrorDetails(e));
+        }
     }
 
     clientInstance = null;
     botConnected = false;
     qrCodeDataURL = null;
-    botStatus = 'Reiniciando...';
-    restarting = false;
+    if (!keepRestarting) restarting = false;
 }
+
+
+app.get('/api/health', (req, res) => {
+    res.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+    res.json({
+        ok: true,
+        service: 'wa-bot',
+        uptimeSeconds: Math.floor(process.uptime()),
+        startedAt: STARTED_AT.toISOString(),
+        now: new Date().toISOString(),
+        timezone: BRASILIA_TZ,
+        state: botState,
+        connected: botConnected
+    });
+});
+
+app.get('/health', (req, res) => {
+    res.redirect('/api/health');
+});
+
+app.get('/ping', (req, res) => {
+    res.set('Cache-Control', 'no-store');
+    res.status(200).send('pong');
+});
 
 app.get('/api/status', (req, res) => {
     res.json({
         connected: botConnected,
+        state: botState,
         status: botStatus,
+        restarting,
         qr: qrCodeDataURL,
         timezone: 'Horário de Brasília',
         supabaseConfigured: Boolean(supabase),
+        uptimeSeconds: Math.floor(process.uptime()),
+        startedAt: STARTED_AT.toISOString(),
         supabaseBucket: SUPABASE_BUCKET,
         supabaseSessionPath: SUPABASE_SESSION_PATH
     });
@@ -378,14 +446,17 @@ app.post('/api/session/delete', async (req, res) => {
 app.post('/api/session/restore', async (req, res) => {
     try {
         res.json({ ok: true, msg: 'Restauração iniciada. O bot será reiniciado.' });
+        restarting = true;
+        setBotState('restoring', 'Restaurando sessão do Supabase...');
         addLog('Sessão', 'Restaurando sessão do Supabase...');
         setTimeout(async () => {
             try {
                 await restoreSessionFromSupabase();
-                addLog('Sessão', 'Sessão restaurada. Bot reiniciado.');
+                addLog('Sessão', 'Sessão restaurada. Aguardando conexão do WhatsApp...');
             } catch (e) {
                 addLog('Erro', 'Erro ao restaurar sessão', getErrorDetails(e));
-                botStatus = 'Erro ao restaurar sessão';
+                setBotState('error', 'Erro ao restaurar sessão');
+                restarting = false;
             }
         }, 500);
     } catch (e) {
@@ -398,10 +469,15 @@ app.get('/', (req, res) => {
     res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
-app.listen(PORT, () => addLog('Servidor', `Rodando na porta ${PORT}`));
+app.listen(PORT, () => {
+    addLog('Servidor', `Rodando na porta ${PORT}`);
+    addLog('Servidor', 'Endpoint de uptime disponível em /api/health');
+});
 
 async function iniciarBot() {
     if (clientInstance) return;
+
+    setBotState('connecting', 'Iniciando WhatsApp...');
 
     ensureDir(AUTH_DIR);
     const execPath = await chromium.executablePath();
@@ -424,40 +500,57 @@ async function iniciarBot() {
         }
     });
 
+    clientInstance.on('loading_screen', (percent, message) => {
+        setBotState('connecting', `Carregando WhatsApp ${percent || 0}%...`);
+        addLog('WhatsApp', `Carregando ${percent || 0}%`, message || '');
+    });
+
+    clientInstance.on('authenticated', () => {
+        qrCodeDataURL = null;
+        setBotState('authenticated', 'Sessão autenticada. Finalizando conexão...');
+        addLog('Bot', 'Sessão autenticada. Aguardando ready...');
+    });
+
     clientInstance.on('qr', async (qr) => {
         addLog('QR', 'Novo QR Code gerado — acesse o painel para escanear.');
         qrCodeDataURL = await qrcode.toDataURL(qr);
-        botStatus = 'Aguardando escaneamento...';
+        setBotState('qr', 'Aguardando escaneamento...');
         botConnected = false;
+        restarting = false;
     });
 
     clientInstance.on('ready', () => {
         addLog('Bot', 'Conectado com sucesso!');
         qrCodeDataURL = null;
-        botStatus = 'Conectado';
+        setBotState('ready', 'Conectado');
         botConnected = true;
+        restarting = false;
         scheduleAll();
     });
 
     clientInstance.on('auth_failure', (msg) => {
         addLog('Erro', `Falha de autenticação: ${msg}`);
-        botStatus = 'Erro de autenticação';
+        setBotState('auth_failure', 'Erro de autenticação');
         botConnected = false;
+        restarting = false;
     });
 
     clientInstance.on('disconnected', (reason) => {
         addLog('Bot', `Desconectado: ${reason}`);
-        botStatus = 'Desconectado';
+        setBotState('disconnected', 'Desconectado');
         botConnected = false;
+        restarting = false;
         qrCodeDataURL = null;
         clientInstance = null;
         if (!restarting) setTimeout(() => iniciarBot(), 5000);
     });
 
+    setBotState('connecting', 'Inicializando client do WhatsApp...');
     clientInstance.initialize().catch((e) => {
         addLog('Erro', 'Erro ao inicializar WhatsApp', getErrorDetails(e));
-        botStatus = 'Erro ao inicializar WhatsApp';
+        setBotState('error', 'Erro ao inicializar WhatsApp');
         botConnected = false;
+        restarting = false;
         clientInstance = null;
         if (!restarting) setTimeout(() => iniciarBot(), 8000);
     });

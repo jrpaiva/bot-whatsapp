@@ -222,12 +222,21 @@ function updateStatus(d) {
   document.getElementById('supabase-status').textContent = d.supabaseConfigured ? 'Configurado' : 'Não configurado';
   document.getElementById('supabase-path').textContent = `${d.supabaseBucket || '-'}/${d.supabaseSessionPath || '-'}`;
 
+  const transientStates = ['starting', 'restoring', 'restarting', 'connecting', 'authenticated'];
+
   if (d.connected) {
     pill.className = 'status-pill connected';
     txt.textContent = 'Conectado';
     qrImg.style.display = 'none';
     qrPh.style.display = 'none';
     connected.style.display = 'block';
+  } else if (transientStates.includes(d.state)) {
+    pill.className = 'status-pill';
+    txt.textContent = d.status || 'Conectando...';
+    qrImg.style.display = 'none';
+    qrPh.style.display = 'flex';
+    qrPh.innerHTML = `<i class="bi bi-hourglass-split mb-2"></i><div class="mono small">${escapeHtml(d.status || 'Conectando...')}</div>`;
+    connected.style.display = 'none';
   } else if (d.qr) {
     pill.className = 'status-pill qr';
     txt.textContent = 'Aguardando QR';
@@ -240,6 +249,7 @@ function updateStatus(d) {
     txt.textContent = d.status || 'Inicializando...';
     qrImg.style.display = 'none';
     qrPh.style.display = 'flex';
+    qrPh.innerHTML = '<i class="bi bi-qr-code-scan mb-2"></i><div class="mono small">Aguardando QR Code</div>';
     connected.style.display = 'none';
   }
 }
@@ -452,7 +462,7 @@ async function enviarManual() {
   }
 
   btn.disabled = true;
-  btn.innerHTML = '<span class="spinner-border spinner-border-sm"></span> Enviando...';
+  btn.innerHTML = '<span class="spinner-border spinner-border-sm"></span> Aguardando conexão/envio...';
 
   const r = await fetch('/api/enviar', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ grupo, mensagem }) });
   const d = await r.json();
