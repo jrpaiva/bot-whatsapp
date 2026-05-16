@@ -5,10 +5,14 @@ const qrcode = require('qrcode-terminal');
 const client = new Client({
     authStrategy: new LocalAuth(),
     puppeteer: {
-        // Sem executablePath! O postinstall vai achar o Chrome sozinho.
+        // Aponta diretamente para a pasta onde o log confirmou que o Chrome foi baixado
+        executablePath: '/opt/render/.cache/puppeteer/chrome/linux-146.0.7680.31/chrome-linux64/chrome',
         args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage']
     }
 });
+
+// O restante do seu código continua exatamente igual abaixo...
+
 
 // O restante do seu código (client.on('qr', ...), client.on('ready', ...) e seus lembretes) continua igual aqui para baixo...
 
