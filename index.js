@@ -1,43 +1,37 @@
 const { Client, LocalAuth } = require('whatsapp-web.js');
-const fs = require('fs');
 const cron = require('node-cron');
-const qrcodeimg = require('qrcode');
+const qrcode = require('qrcode-terminal'); // Mudamos para desenhar nos logs
 
 const client = new Client({
     authStrategy: new LocalAuth(),
     puppeteer: {
+        executablePath: '/usr/bin/google-chrome-stable', // Aponta para o Chrome nativo do Render
         args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage']
     }
 });
 
+// Exibe o QR Code desenhado diretamente na tela preta do Render
 client.on('qr', (qr) => {
-    qrcodeimg.toFile('qrcode.png', qr, (err) => {
-        if (err) console.error('Erro ao gerar imagem do QR Code:', err);
-        console.log('👉 QR CODE ATUALIZADO! Procure o arquivo qrcode.png para escanear.');
-    });
+    console.log('👉 ESCANEIE O QR CODE ABAIXO COM O SEU WHATSAPP BUSINESS:');
+    qrcode.generate(qr, { small: true });
 });
 
 client.on('ready', () => {
     console.log('🚀 Bot conectado com sucesso e rodando na nuvem!');
 
     // =========================================================================
-    // CONFIGURAÇÃO DOS SEUS LEMBRETES (Horário de Brasília)
-    // Dias da semana: 1 = Segunda, 2 = Terça, 3 = Quarta. (1-3 significa Seg a Qua)
-    // ATENÇÃO: Ajustado o fuso horário (Hora do Brasil + 3 horas = Hora do Servidor)
+    // SEUS LEMBRETES (Horário de Brasília)
     // =========================================================================
 
-    // EXEMPLO 1: Envia de Segunda a Quarta, às 09:00 da manhã do Brasil (09+3 = 12h UTC)
+    // Exemplo 1: Segunda a Quarta, às 09:00h do Brasil (09+3 = 12h UTC)
     cron.schedule('0 12 * * 1-3', async () => {
-        // MUDE ABAIXO: "Nome do Grupo" e o texto da mensagem
         await enviarLembrete("Nome Exato do Seu Grupo 1", "⚠️ Lembrete do Grupo 1: Mensagem matinal!");
     });
 
-    // EXEMPLO 2: Envia de Segunda a Quarta, às 15:00 da tarde do Brasil (15+3 = 18h UTC)
+    // Exemplo 2: Segunda a Quarta, às 15:00h do Brasil (15+3 = 18h UTC)
     cron.schedule('0 18 * * 1-3', async () => {
-        // MUDE ABAIXO: "Nome do Grupo" e o texto da mensagem
         await enviarLembrete("Nome Exato do Seu Grupo 2", "🔔 Lembrete do Grupo 2: Mensagem da tarde!");
     });
-
 });
 
 async function enviarLembrete(nomeDoGrupo, mensagem) {
