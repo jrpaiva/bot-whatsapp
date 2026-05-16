@@ -12,7 +12,7 @@ const { createClient } = require('@supabase/supabase-js');
 const app = express();
 const PORT = process.env.PORT || 3000;
 const AUTH_DIR = process.env.WWEBJS_AUTH_DIR || '/tmp/.wwebjs_auth';
-const CONFIG_FILE = path.join(AUTH_DIR, 'config.json');
+const CONFIG_FILE = process.env.BOT_CONFIG_FILE || path.join('/tmp', 'bot_config.json');
 const BRASILIA_TZ = 'America/Sao_Paulo';
 const READY_WAIT_MS = Number(process.env.WWEBJS_READY_WAIT_MS || 45000);
 const STARTED_AT = new Date();
@@ -21,6 +21,7 @@ const SUPABASE_URL = process.env.SUPABASE_URL || '';
 const SUPABASE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY || '';
 const SUPABASE_BUCKET = process.env.SUPABASE_BUCKET || 'whatsapp-sessions';
 const SUPABASE_SESSION_PATH = process.env.SUPABASE_SESSION_PATH || 'wwebjs_auth.zip';
+const SUPABASE_CONFIG_PATH = process.env.SUPABASE_CONFIG_PATH || 'bot_config.json';
 
 const supabase = SUPABASE_URL && SUPABASE_KEY ? createClient(SUPABASE_URL, SUPABASE_KEY) : null;
 
@@ -274,6 +275,65 @@ function requireSupabase() {
     }
 }
 
+async function saveConfigToSupabase() {
+    requireSupabase();
+
+    ensureDir(path.dirname(CONFIG_FILE));
+
+    const normalized = normalizeConfig(config);
+    fs.writeFileSync(CONFIG_FILE, JSON.stringify(normalized, null, 2));
+
+    addLog('Config', `Enviando config para Supabase: ${SUPABASE_BUCKET}/${SUPABASE_CONFIG_PATH}`);
+
+    const fileBuffer = fs.readFileSync(CONFIG_FILE);
+
+    const { error } = await supabase.storage
+        .from(SUPABASE_BUCKET)
+        .upload(SUPABASE_CONFIG_PATH, fileBuffer, {
+            contentType: 'application/json',
+            upsert: true
+        });
+
+    if (error) throw error;
+
+    addLog('Config', 'Config salva no Supabase.');
+}
+
+async function restoreConfigFromSupabase() {
+    if (!supabase) {
+        addLog('Config', 'Supabase não configurado. Usando config local.');
+        return false;
+    }
+
+    try {
+        addLog('Config', `Baixando config do Supabase: ${SUPABASE_BUCKET}/${SUPABASE_CONFIG_PATH}`);
+
+        const { data, error } = await supabase.storage
+            .from(SUPABASE_BUCKET)
+            .download(SUPABASE_CONFIG_PATH);
+
+        if (error) {
+            addLog('Config', 'Nenhuma config remota encontrada. Usando config local.', getErrorDetails(error));
+            return false;
+        }
+
+        const text = await data.text();
+        const remoteConfig = normalizeConfig(JSON.parse(text));
+
+        ensureDir(path.dirname(CONFIG_FILE));
+        fs.writeFileSync(CONFIG_FILE, JSON.stringify(remoteConfig, null, 2));
+
+        config = remoteConfig;
+
+        addLog('Config', `Config restaurada do Supabase com ${config.agendamentos.length} agendamento(s).`);
+
+        return true;
+    } catch (e) {
+        addLog('Erro', 'Erro ao restaurar config do Supabase', getErrorDetails(e));
+        return false;
+    }
+}
+
 async function saveSessionToSupabase() {
     requireSupabase();
     ensureDir(AUTH_DIR);
@@ -325,7 +385,9 @@ async function restoreSessionFromSupabase() {
     await extractZip(tmpFile, AUTH_DIR);
     await fs.promises.rm(tmpFile, { force: true });
 
+    await restoreConfigFromSupabase();
     config = loadConfig();
+
     setBotState('connecting', 'Sessão restaurada. Conectando WhatsApp...');
     await iniciarBot();
 }
@@ -392,12 +454,26 @@ app.get('/api/status', (req, res) => {
 
 app.get('/api/config', (req, res) => res.json(config));
 
-app.post('/api/config', (req, res) => {
-    config = normalizeConfig(req.body);
-    saveConfig(config);
-    if (botConnected) scheduleAll();
-    addLog('Config', 'Configurações salvas.');
-    res.json({ ok: true, config });
+app.post('/api/config', async (req, res) => {
+    try {
+        config = normalizeConfig(req.body);
+
+        saveConfig(config);
+
+        try {
+            await saveConfigToSupabase();
+        } catch (e) {
+            addLog('Erro', 'Config salva localmente, mas falhou ao salvar no Supabase', getErrorDetails(e));
+        }
+
+        if (botConnected) scheduleAll();
+
+        addLog('Config', 'Configurações salvas.');
+        res.json({ ok: true, config });
+    } catch (e) {
+        addLog('Erro', 'Erro ao salvar configurações', getErrorDetails(e));
+        res.status(500).json({ ok: false, msg: getErrorDetails(e) });
+    }
 });
 
 app.get('/api/logs', (req, res) => res.json(logs));
@@ -556,4 +632,10 @@ async function iniciarBot() {
     });
 }
 
-iniciarBot();
+async function bootstrap() {
+    await restoreConfigFromSupabase();
+    config = loadConfig();
+    await iniciarBot();
+}
+
+bootstrap();
