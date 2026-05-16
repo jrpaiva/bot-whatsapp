@@ -592,8 +592,13 @@ app.get('/api/grupos', async (req, res) => {
 
     try {
         const chats = await clientInstance.getChats();
-        const botWid = clientInstance.info?.wid?._serialized || '';
-        const botUser = String(botWid).replace('@c.us', '').replace('@lid', '');
+        const botIdRaw = clientInstance.info?.wid?._serialized || '';
+        const botNumber = String(botIdRaw)
+            .replace('@c.us', '')
+            .replace('@s.whatsapp.net', '')
+            .replace('@lid', '')
+            .replace(/\D/g, '');
+
         const grupos = [];
 
         for (const chat of chats) {
@@ -606,15 +611,21 @@ app.get('/api/grupos', async (req, res) => {
                 const fullChat = await clientInstance.getChatById(groupId);
                 const participants = Array.isArray(fullChat.participants) ? fullChat.participants : [];
 
-                const botAindaParticipa = !botUser || participants.length === 0
-                    ? true
-                    : participants.some(p => {
-                        const pid = String(p?.id?._serialized || p?.id?.user || p?.id || '');
-                        return pid.includes(botUser);
-                    });
+                // Não confiar apenas no getChats(), porque ele pode devolver grupos antigos/cacheados.
+                // Só lista o grupo se o número do bot realmente aparecer entre os participantes atuais.
+                const botAindaParticipa = Boolean(botNumber) && participants.some(p => {
+                    const pidRaw =
+                        p?.id?._serialized ||
+                        p?.id?.user ||
+                        p?.id ||
+                        '';
+
+                    const participantNumber = String(pidRaw).replace(/\D/g, '');
+                    return participantNumber === botNumber;
+                });
 
                 if (!botAindaParticipa) {
-                    addLog('Grupos', `Ignorado porque o bot não participa mais: "${nome}" id="${groupId}"`);
+                    addLog('Grupos', `Ignorado porque o bot não está mais nos participantes: "${nome}" id="${groupId}"`);
                     continue;
                 }
 
@@ -630,7 +641,6 @@ app.get('/api/grupos', async (req, res) => {
         }
 
         grupos.sort((a, b) => a.nome.localeCompare(b.nome));
-        addLog('Grupos', `Lista atualizada com ${grupos.length} grupo(s) disponível(is).`);
         res.json(grupos);
     } catch (e) {
         addLog('Erro', 'Erro ao listar grupos', getErrorDetails(e));
