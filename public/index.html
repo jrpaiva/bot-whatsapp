@@ -1,0 +1,432 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>WA Bot — Painel</title>
+<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet"/>
+<link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet"/>
+<style>
+:root{
+  --bg:#071018;
+  --panel:#0f1722;
+  --panel-2:#121c29;
+  --border:#213247;
+  --green:#25d366;
+  --green-soft:#25d36624;
+  --blue:#53bdeb;
+  --red:#ff5c7a;
+  --yellow:#ffd166;
+  --text:#e8f0f8;
+  --muted:#91a4b7;
+}
+*{box-sizing:border-box}
+body{min-height:100vh;background:radial-gradient(circle at top left,#15324a 0,#071018 38%,#05090e 100%);color:var(--text);font-family:Inter,system-ui,sans-serif}
+body::before{content:"";position:fixed;inset:0;background-image:linear-gradient(#ffffff05 1px,transparent 1px),linear-gradient(90deg,#ffffff05 1px,transparent 1px);background-size:34px 34px;pointer-events:none}
+.app-shell{position:relative;z-index:1;max-width:1380px;margin:0 auto;padding:24px}
+.card-dark{background:linear-gradient(180deg,var(--panel),#0b121b);border:1px solid var(--border);border-radius:22px;box-shadow:0 24px 60px #00000040}
+.card-header-clean{display:flex;align-items:center;justify-content:space-between;gap:14px;margin-bottom:18px}
+.section-title{font-size:.82rem;font-weight:800;text-transform:uppercase;letter-spacing:.12em;color:var(--muted);margin:0}
+.header-title{font-weight:900;letter-spacing:-.04em}.mono{font-family:'Space Mono',monospace}.muted{color:var(--muted)}
+.status-pill{display:inline-flex;align-items:center;gap:8px;padding:8px 12px;border:1px solid var(--border);border-radius:999px;color:var(--muted);font-size:.8rem;font-weight:700;background:#071018}
+.status-dot{width:9px;height:9px;border-radius:99px;background:var(--muted)}
+.status-pill.connected{color:var(--green);border-color:#25d36670;background:var(--green-soft)}.status-pill.connected .status-dot{background:var(--green);box-shadow:0 0 12px var(--green)}
+.status-pill.qr{color:var(--yellow);border-color:#ffd16675;background:#ffd16618}.status-pill.qr .status-dot{background:var(--yellow)}
+.form-control,.form-select{background:#071018;border:1px solid var(--border);color:var(--text);border-radius:14px;padding:11px 14px}.form-control:focus,.form-select:focus{background:#071018;color:var(--text);border-color:var(--green);box-shadow:0 0 0 .25rem var(--green-soft)}
+.form-control::placeholder{color:#6d8193}.form-label{font-size:.74rem;text-transform:uppercase;letter-spacing:.08em;font-weight:800;color:var(--muted)}
+.btn-wa{background:var(--green);border:none;color:#05220f;font-weight:900;border-radius:14px;padding:11px 16px}.btn-wa:hover{background:#50df82;color:#05220f}.btn-soft{background:#111d2a;border:1px solid var(--border);color:var(--text);font-weight:800;border-radius:14px;padding:11px 16px}.btn-soft:hover{border-color:var(--green);color:var(--green)}.btn-danger-soft{background:#ff5c7a15;border:1px solid #ff5c7a70;color:var(--red);font-weight:800;border-radius:14px;padding:11px 16px}.btn-danger-soft:hover{background:var(--red);color:white}
+#qr-img{width:220px;height:220px;border-radius:18px;border:4px solid white;background:white;padding:8px}.qr-box{min-height:260px;display:flex;align-items:center;justify-content:center}.qr-placeholder{width:220px;height:220px;border:1px dashed var(--border);border-radius:18px;display:flex;flex-direction:column;align-items:center;justify-content:center;color:var(--muted);text-align:center;background:#071018}.qr-placeholder i{font-size:42px;opacity:.55}.connected-state{display:none;text-align:center}.connected-state i{font-size:58px;color:var(--green)}
+.logs-box{height:260px;overflow:auto;background:#071018;border:1px solid var(--border);border-radius:18px;padding:14px}.log-entry{display:grid;grid-template-columns:72px 76px 1fr;gap:8px;font-size:.77rem;line-height:1.45}.log-time,.log-type{font-family:'Space Mono',monospace}.log-time{color:var(--muted)}.log-type.Sucesso{color:var(--green)}.log-type.Erro{color:var(--red)}.log-type.Aviso{color:var(--yellow)}.log-type.Bot{color:var(--blue)}.log-type.Cron{color:#d99cff}.log-type.Sessão{color:#9fe870}.log-type.Config{color:var(--yellow)}
+.ag-card{background:#071018;border:1px solid var(--border);border-radius:20px;padding:18px}.ag-card.active{border-color:#25d36680;box-shadow:0 0 0 4px var(--green-soft)}.days-grid{display:grid;grid-template-columns:repeat(7,1fr);gap:8px}.day-check input{display:none}.day-check span{display:flex;align-items:center;justify-content:center;min-height:40px;border:1px solid var(--border);border-radius:12px;color:var(--muted);font-weight:900;background:#0d1722;cursor:pointer}.day-check input:checked+span{background:var(--green);color:#05220f;border-color:var(--green)}
+.whatsapp-preview{background:#0b141a;border:1px solid var(--border);border-radius:22px;overflow:hidden}.wa-top{height:48px;background:#202c33;display:flex;align-items:center;gap:10px;padding:0 14px}.wa-avatar{width:30px;height:30px;border-radius:50%;background:#6b7c86;display:flex;align-items:center;justify-content:center;color:white}.wa-chat{min-height:190px;padding:18px;background-color:#0b141a;background-image:radial-gradient(#ffffff08 1px,transparent 1px);background-size:16px 16px}.wa-bubble{max-width:86%;margin-left:auto;background:#005c4b;color:#e9edef;border-radius:14px 0 14px 14px;padding:10px 12px;white-space:pre-wrap;font-size:.94rem;line-height:1.45;word-break:break-word}.wa-empty{color:#81929d;font-style:italic}.wa-time{text-align:right;color:#b7c8d0;font-size:.68rem;margin-top:6px}.modal-content{background:var(--panel);border:1px solid var(--border);border-radius:22px;color:var(--text)}.modal-header,.modal-footer{border-color:var(--border)}.toast-custom{position:fixed;right:24px;bottom:24px;z-index:2000;background:var(--green);color:#05220f;border-radius:14px;padding:12px 16px;font-weight:900;transform:translateY(80px);opacity:0;transition:.25s}.toast-custom.show{transform:translateY(0);opacity:1}.badge-soft{background:#132235;border:1px solid var(--border);color:var(--muted);border-radius:999px;padding:6px 10px;font-weight:800}
+@media(max-width:768px){.app-shell{padding:14px}.days-grid{grid-template-columns:repeat(4,1fr)}.log-entry{grid-template-columns:62px 68px 1fr}.card-header-clean{align-items:flex-start;flex-direction:column}}
+</style>
+</head>
+<body>
+<div class="app-shell">
+  <header class="d-flex flex-wrap align-items-center justify-content-between gap-3 mb-4">
+    <div>
+      <div class="d-flex align-items-center gap-3">
+        <div class="rounded-4 d-flex align-items-center justify-content-center" style="width:48px;height:48px;background:var(--green);color:#05220f;font-size:1.45rem"><i class="bi bi-whatsapp"></i></div>
+        <div>
+          <h1 class="header-title h3 mb-0">WA Bot</h1>
+          <div class="muted fw-semibold">Painel de agendamentos em horário de Brasília</div>
+        </div>
+      </div>
+    </div>
+    <div class="d-flex flex-wrap gap-2 align-items-center">
+      <span class="badge-soft"><i class="bi bi-clock"></i> Brasília</span>
+      <button class="btn btn-soft" data-bs-toggle="modal" data-bs-target="#sessionModal"><i class="bi bi-database-check"></i> Sessão</button>
+      <div class="status-pill" id="status-pill"><span class="status-dot"></span><span id="status-text">Inicializando...</span></div>
+    </div>
+  </header>
+
+  <div class="row g-3 mb-3">
+    <div class="col-lg-5">
+      <section class="card-dark p-4 h-100">
+        <div class="card-header-clean"><h2 class="section-title">Conexão WhatsApp</h2><span class="muted mono small" id="tz-info">America/Sao_Paulo</span></div>
+        <div class="qr-box">
+          <div class="qr-placeholder" id="qr-placeholder"><i class="bi bi-qr-code-scan mb-2"></i><div class="mono small">Aguardando QR Code</div></div>
+          <img id="qr-img" src="" alt="QR Code" style="display:none"/>
+          <div class="connected-state" id="connected-state"><i class="bi bi-check-circle-fill"></i><h3 class="h5 mt-2 mb-1">Bot conectado</h3><p class="muted mb-0">WhatsApp ativo e pronto para enviar mensagens.</p></div>
+        </div>
+      </section>
+    </div>
+    <div class="col-lg-7">
+      <section class="card-dark p-4 h-100">
+        <div class="card-header-clean">
+          <h2 class="section-title">Logs em tempo real</h2>
+          <button class="btn btn-soft btn-sm" onclick="copyLogs()"><i class="bi bi-copy"></i> Copiar</button>
+        </div>
+        <div class="logs-box" id="logs-box"><div class="log-entry"><span class="log-time">--:--</span><span class="log-type">Info</span><span>Aguardando conexão...</span></div></div>
+      </section>
+    </div>
+  </div>
+
+  <section class="card-dark p-4 mb-3">
+    <div class="card-header-clean">
+      <div>
+        <h2 class="section-title">Agendamentos</h2>
+        <div class="muted small mt-1">Selecione dias e horários diretamente em horário de Brasília. O cron é gerado automaticamente.</div>
+      </div>
+      <div class="d-flex gap-2">
+        <button class="btn btn-soft" onclick="addAg()"><i class="bi bi-plus-lg"></i> Novo</button>
+        <button class="btn btn-wa" onclick="saveConfig()"><i class="bi bi-save"></i> Salvar tudo</button>
+      </div>
+    </div>
+    <div class="vstack gap-3" id="ag-list"></div>
+  </section>
+
+  <section class="card-dark p-4 mb-4">
+    <div class="card-header-clean"><h2 class="section-title">Envio manual</h2><span class="muted small">Preview no formato de conversa do WhatsApp</span></div>
+    <div class="row g-4">
+      <div class="col-lg-6">
+        <div class="mb-3">
+          <label class="form-label">Grupo de destino</label>
+          <input type="text" class="form-control" id="manual-grupo" placeholder="Nome exato do grupo" list="grupos-list"/>
+        </div>
+        <div class="mb-3">
+          <label class="form-label">Mensagem</label>
+          <textarea class="form-control" id="manual-msg" rows="7" placeholder="Digite sua mensagem aqui..."></textarea>
+        </div>
+        <button class="btn btn-wa w-100" id="btn-send" onclick="enviarManual()"><i class="bi bi-send-fill"></i> Enviar agora</button>
+        <div id="send-result" class="alert mt-3 d-none mb-0"></div>
+      </div>
+      <div class="col-lg-6">
+        <div class="whatsapp-preview">
+          <div class="wa-top"><div class="wa-avatar"><i class="bi bi-people-fill"></i></div><div><div class="fw-bold" id="manual-preview-grupo">Grupo</div><div class="small muted">online</div></div></div>
+          <div class="wa-chat"><div class="wa-bubble" id="manual-preview"><span class="wa-empty">A mensagem aparecerá aqui...</span></div></div>
+        </div>
+      </div>
+    </div>
+  </section>
+</div>
+
+<div class="modal fade" id="sessionModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-dialog-centered">
+    <div class="modal-content">
+      <div class="modal-header">
+        <div>
+          <h5 class="modal-title fw-black">Gerenciar sessão do WhatsApp</h5>
+          <div class="muted small">Supabase Storage manual: salvar, excluir ou restaurar.</div>
+        </div>
+        <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Fechar"></button>
+      </div>
+      <div class="modal-body">
+        <div class="alert alert-dark border-secondary text-light small mb-3">
+          <div><strong>Status:</strong> <span id="supabase-status">Verificando...</span></div>
+          <div><strong>Arquivo:</strong> <span id="supabase-path" class="mono">-</span></div>
+        </div>
+        <div id="session-result" class="alert d-none"></div>
+        <div class="d-grid gap-2">
+          <button class="btn btn-wa" onclick="sessionAction('save')"><i class="bi bi-cloud-arrow-up-fill"></i> Salvar Sessão</button>
+          <button class="btn btn-soft" onclick="sessionAction('restore')"><i class="bi bi-cloud-arrow-down-fill"></i> Restaurar</button>
+          <button class="btn btn-danger-soft" onclick="sessionAction('delete')"><i class="bi bi-trash3-fill"></i> Excluir Sessão</button>
+        </div>
+      </div>
+      <div class="modal-footer"><button type="button" class="btn btn-soft" data-bs-dismiss="modal">Fechar</button></div>
+    </div>
+  </div>
+</div>
+
+<datalist id="grupos-list"></datalist>
+<div id="toast" class="toast-custom">Salvo com sucesso</div>
+
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+<script>
+let config = { agendamentos: [] };
+let grupos = [];
+let lastLogs = [];
+const dayLabels = [
+  { id: 0, label: 'Dom' }, { id: 1, label: 'Seg' }, { id: 2, label: 'Ter' }, { id: 3, label: 'Qua' },
+  { id: 4, label: 'Qui' }, { id: 5, label: 'Sex' }, { id: 6, label: 'Sáb' }
+];
+
+function escapeHtml(value) {
+  return String(value ?? '').replace(/[&<>'"]/g, char => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[char]));
+}
+
+function buildCron(horario, diasSemana) {
+  const [h='12', m='00'] = String(horario || '12:00').split(':');
+  const days = Array.isArray(diasSemana) && diasSemana.length ? diasSemana.join(',') : '*';
+  return `${Number(m) || 0} ${Number(h) || 0} * * ${days}`;
+}
+
+function normalizeAg(ag) {
+  const dias = Array.isArray(ag.diasSemana) ? ag.diasSemana.map(Number) : [1,2,3];
+  const horario = ag.horario || '12:00';
+  return { ...ag, diasSemana: dias, horario, cron: buildCron(horario, dias) };
+}
+
+function showToast(text = 'Salvo com sucesso') {
+  const toast = document.getElementById('toast');
+  toast.textContent = text;
+  toast.classList.add('show');
+  setTimeout(() => toast.classList.remove('show'), 2500);
+}
+
+async function pollStatus() {
+  try {
+    const r = await fetch('/api/status');
+    const d = await r.json();
+    updateStatus(d);
+  } catch(e) {}
+  setTimeout(pollStatus, 3000);
+}
+
+function updateStatus(d) {
+  const pill = document.getElementById('status-pill');
+  const txt = document.getElementById('status-text');
+  const qrImg = document.getElementById('qr-img');
+  const qrPh = document.getElementById('qr-placeholder');
+  const connected = document.getElementById('connected-state');
+
+  document.getElementById('supabase-status').textContent = d.supabaseConfigured ? 'Configurado' : 'Não configurado';
+  document.getElementById('supabase-path').textContent = `${d.supabaseBucket || '-'}/${d.supabaseSessionPath || '-'}`;
+
+  if (d.connected) {
+    pill.className = 'status-pill connected';
+    txt.textContent = 'Conectado';
+    qrImg.style.display = 'none';
+    qrPh.style.display = 'none';
+    connected.style.display = 'block';
+  } else if (d.qr) {
+    pill.className = 'status-pill qr';
+    txt.textContent = 'Aguardando QR';
+    qrImg.src = d.qr;
+    qrImg.style.display = 'block';
+    qrPh.style.display = 'none';
+    connected.style.display = 'none';
+  } else {
+    pill.className = 'status-pill';
+    txt.textContent = d.status || 'Inicializando...';
+    qrImg.style.display = 'none';
+    qrPh.style.display = 'flex';
+    connected.style.display = 'none';
+  }
+}
+
+async function pollLogs() {
+  try {
+    const r = await fetch('/api/logs');
+    lastLogs = await r.json();
+    const box = document.getElementById('logs-box');
+    box.innerHTML = lastLogs.map(l => `
+      <div class="log-entry">
+        <span class="log-time">${escapeHtml(l.time)}</span>
+        <span class="log-type ${escapeHtml(l.type)}">${escapeHtml(l.type)}</span>
+        <span>${escapeHtml(l.msg)}</span>
+      </div>
+    `).join('') || '<div class="muted small">Sem logs ainda...</div>';
+  } catch(e) {}
+  setTimeout(pollLogs, 3000);
+}
+
+function copyLogs() {
+  const text = lastLogs.map(l => `[${l.time}] [${l.type}] ${l.msg}`).join('\n');
+  navigator.clipboard.writeText(text || 'Sem logs');
+  showToast('Logs copiados');
+}
+
+async function loadConfig() {
+  const r = await fetch('/api/config');
+  config = await r.json();
+  config.agendamentos = (config.agendamentos || []).map(normalizeAg);
+  renderAgs();
+}
+
+async function loadGrupos() {
+  try {
+    const r = await fetch('/api/grupos');
+    grupos = await r.json();
+    const dl = document.getElementById('grupos-list');
+    dl.innerHTML = grupos.map(g => `<option value="${escapeHtml(g)}">`).join('');
+  } catch(e) {}
+  setTimeout(loadGrupos, 15000);
+}
+
+function renderAgs() {
+  const list = document.getElementById('ag-list');
+  list.innerHTML = (config.agendamentos || []).map((agRaw, i) => {
+    const ag = normalizeAg(agRaw);
+    config.agendamentos[i] = ag;
+    return `
+      <div class="ag-card ${ag.ativo ? 'active' : ''}" id="ag-${ag.id}">
+        <div class="row g-3">
+          <div class="col-lg-4">
+            <label class="form-label">Grupo</label>
+            <input class="form-control" type="text" value="${escapeHtml(ag.grupo)}" list="grupos-list" placeholder="Nome exato do grupo" oninput="updateAg(${i}, 'grupo', this.value)">
+          </div>
+          <div class="col-lg-3">
+            <label class="form-label">Horário de Brasília</label>
+            <input class="form-control" type="time" value="${escapeHtml(ag.horario)}" oninput="updateAg(${i}, 'horario', this.value)">
+          </div>
+          <div class="col-lg-3">
+            <label class="form-label">Status</label>
+            <select class="form-select" onchange="updateAg(${i}, 'ativo', this.value === 'true')">
+              <option value="false" ${!ag.ativo ? 'selected' : ''}>Inativo</option>
+              <option value="true" ${ag.ativo ? 'selected' : ''}>Ativo</option>
+            </select>
+          </div>
+          <div class="col-lg-2 d-flex align-items-end">
+            <button class="btn btn-danger-soft w-100" onclick="removeAg(${i})"><i class="bi bi-trash3"></i></button>
+          </div>
+          <div class="col-12">
+            <label class="form-label">Dias da semana</label>
+            <div class="days-grid">
+              ${dayLabels.map(d => `
+                <label class="day-check">
+                  <input type="checkbox" ${ag.diasSemana.includes(d.id) ? 'checked' : ''} onchange="toggleDay(${i}, ${d.id}, this.checked)">
+                  <span>${d.label}</span>
+                </label>
+              `).join('')}
+            </div>
+          </div>
+          <div class="col-lg-6">
+            <label class="form-label">Mensagem</label>
+            <textarea class="form-control" rows="6" placeholder="Mensagem a enviar" oninput="updateAg(${i}, 'mensagem', this.value); updateAgPreview(${i})">${escapeHtml(ag.mensagem)}</textarea>
+          </div>
+          <div class="col-lg-6">
+            <label class="form-label">Preview da mensagem</label>
+            <div class="whatsapp-preview">
+              <div class="wa-top"><div class="wa-avatar"><i class="bi bi-people-fill"></i></div><div><div class="fw-bold">${escapeHtml(ag.grupo || 'Grupo')}</div><div class="small muted">agendado às ${escapeHtml(ag.horario)}</div></div></div>
+              <div class="wa-chat"><div class="wa-bubble" id="ag-preview-${i}">${renderMessagePreview(ag.mensagem)}</div></div>
+            </div>
+            <div class="mono muted small mt-2">Cron gerado: <span id="cron-${i}">${escapeHtml(ag.cron)}</span></div>
+          </div>
+        </div>
+      </div>`;
+  }).join('');
+}
+
+function renderMessagePreview(msg) {
+  if (!msg) return '<span class="wa-empty">A mensagem aparecerá aqui...</span>';
+  return `${escapeHtml(msg)}<div class="wa-time">${new Date().toLocaleTimeString('pt-BR', { hour:'2-digit', minute:'2-digit' })}</div>`;
+}
+
+function updateAg(i, key, val) {
+  config.agendamentos[i][key] = val;
+  config.agendamentos[i] = normalizeAg(config.agendamentos[i]);
+  const cronEl = document.getElementById(`cron-${i}`);
+  if (cronEl) cronEl.textContent = config.agendamentos[i].cron;
+  const item = document.getElementById(`ag-${config.agendamentos[i].id}`);
+  if (item && key === 'ativo') item.classList.toggle('active', val);
+}
+
+function toggleDay(i, day, checked) {
+  const days = new Set(config.agendamentos[i].diasSemana || []);
+  checked ? days.add(day) : days.delete(day);
+  config.agendamentos[i].diasSemana = [...days].sort((a,b) => a-b);
+  updateAg(i, 'diasSemana', config.agendamentos[i].diasSemana);
+}
+
+function updateAgPreview(i) {
+  const prev = document.getElementById(`ag-preview-${i}`);
+  if (prev) prev.innerHTML = renderMessagePreview(config.agendamentos[i].mensagem);
+}
+
+function addAg() {
+  config.agendamentos.push({ id: Date.now(), grupo: '', mensagem: '', horario: '08:00', diasSemana: [1,2,3,4,5], cron: '0 8 * * 1,2,3,4,5', ativo: false });
+  renderAgs();
+}
+
+function removeAg(i) {
+  config.agendamentos.splice(i, 1);
+  renderAgs();
+}
+
+async function saveConfig() {
+  config.agendamentos = config.agendamentos.map(normalizeAg);
+  await fetch('/api/config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(config) });
+  showToast('Configurações salvas');
+}
+
+function updateManualPreview() {
+  const msg = document.getElementById('manual-msg').value;
+  const grupo = document.getElementById('manual-grupo').value || 'Grupo';
+  document.getElementById('manual-preview-grupo').textContent = grupo;
+  document.getElementById('manual-preview').innerHTML = renderMessagePreview(msg);
+}
+
+document.getElementById('manual-msg').addEventListener('input', updateManualPreview);
+document.getElementById('manual-grupo').addEventListener('input', updateManualPreview);
+
+async function enviarManual() {
+  const grupo = document.getElementById('manual-grupo').value.trim();
+  const mensagem = document.getElementById('manual-msg').value.trim();
+  const result = document.getElementById('send-result');
+  const btn = document.getElementById('btn-send');
+
+  if (!grupo || !mensagem) {
+    result.className = 'alert alert-danger mt-3 mb-0';
+    result.classList.remove('d-none');
+    result.textContent = 'Preencha o grupo e a mensagem.';
+    return;
+  }
+
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner-border spinner-border-sm"></span> Enviando...';
+
+  const r = await fetch('/api/enviar', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ grupo, mensagem }) });
+  const d = await r.json();
+
+  result.classList.remove('d-none');
+  if (d.ok) {
+    result.className = 'alert alert-success mt-3 mb-0';
+    result.textContent = 'Mensagem enviada com sucesso.';
+    document.getElementById('manual-msg').value = '';
+    updateManualPreview();
+  } else {
+    result.className = 'alert alert-danger mt-3 mb-0';
+    result.textContent = d.msg || 'Erro ao enviar.';
+  }
+
+  btn.disabled = false;
+  btn.innerHTML = '<i class="bi bi-send-fill"></i> Enviar agora';
+}
+
+async function sessionAction(action) {
+  const map = { save: '/api/session/save', restore: '/api/session/restore', delete: '/api/session/delete' };
+  const labels = { save: 'Salvando sessão...', restore: 'Restaurando sessão...', delete: 'Excluindo sessão...' };
+  const box = document.getElementById('session-result');
+  box.className = 'alert alert-info';
+  box.textContent = labels[action];
+  box.classList.remove('d-none');
+
+  const r = await fetch(map[action], { method: 'POST' });
+  const d = await r.json().catch(() => ({ ok:false, msg:'Erro inesperado.' }));
+
+  box.className = d.ok ? 'alert alert-success' : 'alert alert-danger';
+  box.textContent = d.msg || (d.ok ? 'Operação concluída.' : 'Falha na operação.');
+  if (d.ok) showToast(d.msg || 'Operação concluída');
+}
+
+pollStatus();
+pollLogs();
+loadConfig();
+loadGrupos();
+updateManualPreview();
+</script>
+</body>
+</html>
