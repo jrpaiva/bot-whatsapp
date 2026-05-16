@@ -1,14 +1,15 @@
 const { Client, LocalAuth } = require('whatsapp-web.js');
 const cron = require('node-cron');
-const qrcode = require('qrcode-terminal'); // Mudamos para desenhar nos logs
+const qrcode = require('qrcode-terminal');
 
 const client = new Client({
     authStrategy: new LocalAuth(),
     puppeteer: {
-        executablePath: '/usr/bin/google-chrome-stable', // Aponta para o Chrome nativo do Render
+        // Removida a linha do executablePath para usar o Chrome baixado automaticamente
         args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage']
     }
 });
+
 
 // Exibe o QR Code desenhado diretamente na tela preta do Render
 client.on('qr', (qr) => {
