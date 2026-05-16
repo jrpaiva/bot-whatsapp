@@ -38,6 +38,7 @@ function getDefaultConfig() {
             {
                 id: 1,
                 grupo: '',
+                grupoId: '',
                 mensagem: '',
                 cron: '0 12 * * 1-3',
                 diasSemana: [1, 2, 3],
@@ -57,6 +58,8 @@ function migrateAgendamento(ag) {
         migrated.diasSemana = Array.isArray(migrated.diasSemana) ? migrated.diasSemana : parsed.diasSemana;
     }
 
+    migrated.grupo = migrated.grupo || '';
+    migrated.grupoId = migrated.grupoId || '';
     migrated.cron = buildCronFromSchedule(migrated.horario, migrated.diasSemana);
     return migrated;
 }
@@ -237,7 +240,7 @@ function scheduleAll() {
         try {
             scheduledJobs[ag.id] = cron.schedule(ag.cron, async () => {
                 const agora = new Date().toLocaleString('pt-BR', { timeZone: BRASILIA_TZ });
-                addLog('Cron', `Disparo iniciado: grupo="${ag.grupo}", horário="${ag.horario || 'sem horário'}", data="${agora}"`);
+                addLog('Cron', `Disparo iniciado: grupo="${ag.grupo}", id="${ag.grupoId || 'sem id'}", horário="${ag.horario || 'sem horário'}", data="${agora}"`);
                 try {
                     if (!ag.ativo) {
                         addLog('Cron', `Ignorado porque está inativo: grupo="${ag.grupo}"`);
@@ -247,14 +250,14 @@ function scheduleAll() {
                         addLog('Erro', `Agendamento incompleto: grupo="${ag.grupo || 'vazio'}"`);
                         return;
                     }
-                    const result = await enviarLembrete(ag.grupo, ag.mensagem, { source: 'cron', agendamentoId: ag.id });
+                    const result = await enviarLembrete(ag.grupo, ag.mensagem, { source: 'cron', agendamentoId: ag.id, grupoId: ag.grupoId });
                     if (result.ok) addLog('Cron', `Disparo finalizado com sucesso: grupo="${ag.grupo}"`);
                     else addLog('Erro', `Disparo falhou: grupo="${ag.grupo}"`, result.msg || 'erro não informado');
                 } catch (e) {
                     addLog('Erro', `Falha no agendamento: grupo="${ag.grupo}"`, getErrorDetails(e));
                 }
             }, { timezone: BRASILIA_TZ });
-            addLog('Cron', `Agendado: "${ag.grupo}" às ${ag.horario || 'sem horário'} [Brasília] cron="${ag.cron}" ativo=${ag.ativo ? 'sim' : 'não'}`);
+            addLog('Cron', `Agendado: "${ag.grupo}" id="${ag.grupoId || 'sem id'}" às ${ag.horario || 'sem horário'} [Brasília] cron="${ag.cron}" ativo=${ag.ativo ? 'sim' : 'não'}`);
         } catch (e) {
             addLog('Erro', `Cron inválido para agendamento ${ag.id}`, getErrorDetails(e));
         }
@@ -278,6 +281,8 @@ async function waitUntilReady(timeoutMs = READY_WAIT_MS) {
 }
 
 async function enviarLembrete(grupo, mensagem, meta = {}) {
+    const grupoId = meta.grupoId || '';
+
     if (!clientInstance || !botConnected) {
         if (clientInstance && ['starting', 'connecting', 'authenticated', 'restoring'].includes(botState)) {
             addLog('Info', `Bot ainda não está pronto. Aguardando até ${Math.round(READY_WAIT_MS / 1000)}s antes de enviar...`);
@@ -291,6 +296,7 @@ async function enviarLembrete(grupo, mensagem, meta = {}) {
             return { ok: false, msg: `Bot não conectado. Estado atual: ${botStatus}` };
         }
     }
+
     try {
         const mensagemFinal = sanitizeWhatsAppMessage(applyMessageVariables(mensagem, grupo));
         if (!mensagemFinal) {
@@ -298,23 +304,45 @@ async function enviarLembrete(grupo, mensagem, meta = {}) {
             return { ok: false, msg: 'Mensagem vazia após limpeza.' };
         }
 
-        addLog('WhatsApp', `Tentando enviar mensagem para "${grupo}" com ${mensagemFinal.length} caracteres.`);
+        addLog('WhatsApp', `Tentando enviar mensagem para "${grupo}"${grupoId ? ` id="${grupoId}"` : ''} com ${mensagemFinal.length} caracteres.`);
+
         const chats = await clientInstance.getChats();
-        const g = chats.find(c => c.isGroup && c.name === grupo);
-        if (g) {
-            const sentMsg = await clientInstance.sendMessage(g.id._serialized, mensagemFinal);
-            const msgId = sentMsg?.id?._serialized || sentMsg?.id?.id || 'sem-id';
-            addLog('Sucesso', `Mensagem enviada para "${grupo}". ID=${msgId}`);
-            return { ok: true, id: msgId };
+        let g = null;
+
+        if (grupoId) {
+            g = chats.find(c => c.isGroup && c.id && c.id._serialized === grupoId);
+            if (!g) {
+                addLog('Aviso', `ID do grupo não apareceu em getChats(). Tentando enviar direto pelo ID: ${grupoId}`);
+            }
         }
-        addLog('Aviso', `Grupo "${grupo}" não encontrado.`);
-        return { ok: false, msg: `Grupo "${grupo}" não encontrado.` };
+
+        if (!grupoId) {
+            const matches = chats.filter(c => c.isGroup && c.name === grupo);
+            if (matches.length > 1) {
+                addLog('Aviso', `Existem ${matches.length} grupos com o nome "${grupo}". Selecione o grupo pela lista para salvar o ID correto.`);
+            }
+            g = matches[0] || null;
+        }
+
+        const destinoId = grupoId || g?.id?._serialized;
+        const destinoNome = g?.name || grupo;
+
+        if (!destinoId) {
+            addLog('Aviso', `Grupo "${grupo}" não encontrado.`);
+            return { ok: false, msg: `Grupo "${grupo}" não encontrado.` };
+        }
+
+        addLog('WhatsApp', `Destino resolvido: nome="${destinoNome}", id="${destinoId}"`);
+
+        const sentMsg = await clientInstance.sendMessage(destinoId, mensagemFinal);
+        const msgId = sentMsg?.id?._serialized || sentMsg?.id?.id || 'sem-id';
+        addLog('Sucesso', `Mensagem enviada para "${destinoNome}". GrupoID=${destinoId}. ID=${msgId}`);
+        return { ok: true, id: msgId, grupo: destinoNome, grupoId: destinoId };
     } catch (e) {
         addLog('Erro', 'Falha ao enviar mensagem', getErrorDetails(e));
         return { ok: false, msg: getErrorDetails(e) };
     }
 }
-
 
 function zipDirectory(sourceDir, outPath) {
     return new Promise((resolve, reject) => {
@@ -396,7 +424,7 @@ async function restoreConfigFromSupabase() {
 
         if (total > 0) {
             config.agendamentos.forEach((ag, index) => {
-                addLog('Config', `Restaurado #${index + 1}: grupo="${ag.grupo || 'sem grupo'}", horário="${ag.horario || 'sem horário'}", ativo=${ag.ativo ? 'sim' : 'não'}, cron="${ag.cron || 'sem cron'}"`);
+                addLog('Config', `Restaurado #${index + 1}: grupo="${ag.grupo || 'sem grupo'}", id="${ag.grupoId || 'sem id'}", horário="${ag.horario || 'sem horário'}", ativo=${ag.ativo ? 'sim' : 'não'}, cron="${ag.cron || 'sem cron'}"`);
             });
         }
         return true;
@@ -549,9 +577,9 @@ app.post('/api/config', async (req, res) => {
 app.get('/api/logs', (req, res) => res.json(logs));
 
 app.post('/api/enviar', async (req, res) => {
-    const { grupo, mensagem } = req.body;
-    if (!grupo || !mensagem) return res.json({ ok: false, msg: 'Grupo e mensagem obrigatórios.' });
-    const result = await enviarLembrete(grupo, mensagem);
+    const { grupo, grupoId, mensagem } = req.body;
+    if ((!grupo && !grupoId) || !mensagem) return res.json({ ok: false, msg: 'Grupo e mensagem obrigatórios.' });
+    const result = await enviarLembrete(grupo || grupoId, mensagem, { grupoId });
     res.json(result);
 });
 
@@ -559,7 +587,10 @@ app.get('/api/grupos', async (req, res) => {
     if (!clientInstance || !botConnected) return res.json([]);
     try {
         const chats = await clientInstance.getChats();
-        const grupos = chats.filter(c => c.isGroup).map(c => c.name).sort((a, b) => a.localeCompare(b));
+        const grupos = chats
+            .filter(c => c.isGroup)
+            .map(c => ({ nome: c.name, id: c.id._serialized }))
+            .sort((a, b) => a.nome.localeCompare(b.nome));
         res.json(grupos);
     } catch (e) {
         addLog('Erro', 'Erro ao listar grupos', getErrorDetails(e));

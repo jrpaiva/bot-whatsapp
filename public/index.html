@@ -45,6 +45,8 @@ body::before{content:"";position:fixed;inset:0;background-image:linear-gradient(
 .ag-summary{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:14px}
 .ag-summary-left{display:flex;align-items:center;gap:10px;min-width:0}
 .ag-group-title{font-weight:900;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:420px}
+.group-id-line{font-family:'Space Mono',monospace;color:#6f8396;font-size:.68rem;max-width:520px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.group-select-help{font-family:'Space Mono',monospace;color:#6f8396;font-size:.72rem;margin-top:6px;word-break:break-all}
 .status-mini{display:inline-flex;align-items:center;gap:6px;border-radius:999px;padding:5px 10px;font-size:.8rem;font-weight:900;border:1px solid var(--border)}
 .status-mini.active{background:var(--green-soft);color:var(--green)}
 .status-mini.inactive{background:#ffd1661f;color:var(--yellow)}
@@ -123,7 +125,10 @@ body::before{content:"";position:fixed;inset:0;background-image:linear-gradient(
       <div class="col-lg-6">
         <div class="mb-3">
           <label class="form-label">Grupo de destino</label>
-          <input type="text" class="form-control" id="manual-grupo" placeholder="Nome exato do grupo" list="grupos-list"/>
+          <select class="form-select" id="manual-grupo-id" onchange="onManualGroupChange()">
+            <option value="">Carregando grupos...</option>
+          </select>
+          <div class="group-select-help" id="manual-grupo-id-view">Selecione o grupo para usar o ID real do WhatsApp.</div>
         </div>
         <div class="mb-3">
           <label class="form-label">Mensagem</label>
@@ -178,7 +183,6 @@ body::before{content:"";position:fixed;inset:0;background-image:linear-gradient(
   </div>
 </div>
 
-<datalist id="grupos-list"></datalist>
 <div id="toast" class="toast-custom">Salvo com sucesso</div>
 
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
@@ -243,7 +247,7 @@ function buildCron(horario, diasSemana) {
 function normalizeAg(ag) {
   const dias = Array.isArray(ag.diasSemana) ? ag.diasSemana.map(Number).filter(d => d >= 0 && d <= 6).sort((a,b) => a-b) : [1,2,3];
   const horario = ag.horario || '12:00';
-  return { ...ag, id: ag.id || Date.now(), diasSemana: dias, horario, cron: buildCron(horario, dias) };
+  return { ...ag, id: ag.id || Date.now(), grupo: ag.grupo || '', grupoId: ag.grupoId || '', diasSemana: dias, horario, cron: buildCron(horario, dias) };
 }
 
 function showToast(text = 'Salvo com sucesso') {
@@ -337,13 +341,94 @@ async function loadConfig() {
 async function loadGrupos() {
   try {
     const r = await fetch('/api/grupos');
-    grupos = await r.json();
-    const dl = document.getElementById('grupos-list');
-    dl.innerHTML = grupos.map(g => `<option value="${escapeHtml(g)}">`).join('');
+    const data = await r.json();
+    grupos = Array.isArray(data)
+      ? data.map(g => typeof g === 'string' ? { nome: g, id: '' } : { nome: g.nome || g.name || '', id: g.id || '' }).filter(g => g.nome)
+      : [];
+    refreshGroupSelects();
   } catch(e) {}
   setTimeout(loadGrupos, 15000);
 }
 
+function findGrupoById(id) {
+  return grupos.find(g => g.id === id) || null;
+}
+
+function findGrupoByName(nome) {
+  return grupos.find(g => g.nome === nome) || null;
+}
+
+function groupSelectOptions(selectedId = '', selectedName = '') {
+  const hasSelected = selectedId && grupos.some(g => g.id === selectedId);
+  let html = '<option value="">Selecione um grupo</option>';
+
+  if (selectedId && !hasSelected) {
+    html += `<option value="${escapeHtml(selectedId)}" selected>${escapeHtml(selectedName || 'Grupo salvo')} — ${escapeHtml(selectedId)}</option>`;
+  }
+
+  html += grupos.map(g => {
+    const selected = g.id === selectedId || (!selectedId && selectedName && g.nome === selectedName) ? 'selected' : '';
+    return `<option value="${escapeHtml(g.id)}" ${selected}>${escapeHtml(g.nome)}${g.id ? ' — ' + escapeHtml(g.id) : ''}</option>`;
+  }).join('');
+
+  return html;
+}
+
+function refreshGroupSelects() {
+  let configChanged = false;
+
+  if (Array.isArray(config.agendamentos)) {
+    config.agendamentos = config.agendamentos.map(ag => {
+      const normalized = normalizeAg(ag);
+      if (!normalized.grupoId && normalized.grupo) {
+        const found = findGrupoByName(normalized.grupo);
+        if (found?.id) {
+          configChanged = true;
+          return { ...normalized, grupoId: found.id, grupo: found.nome };
+        }
+      }
+      return normalized;
+    });
+  }
+
+  const manual = document.getElementById('manual-grupo-id');
+  if (manual) {
+    const current = manual.value;
+    manual.innerHTML = groupSelectOptions(current, '');
+    if (current) manual.value = current;
+    updateManualGroupIdView();
+  }
+
+  const active = document.activeElement;
+  const editingText = active && (active.tagName === 'TEXTAREA' || active.type === 'time');
+  if (configChanged || !editingText) renderAgs();
+}
+
+function getManualGroup() {
+  const id = document.getElementById('manual-grupo-id')?.value || '';
+  const found = findGrupoById(id);
+  return { grupo: found?.nome || '', grupoId: id };
+}
+
+function updateManualGroupIdView() {
+  const box = document.getElementById('manual-grupo-id-view');
+  if (!box) return;
+  const { grupo, grupoId } = getManualGroup();
+  box.textContent = grupoId ? `${grupo} · ${grupoId}` : 'Selecione o grupo para usar o ID real do WhatsApp.';
+}
+
+function onManualGroupChange() {
+  updateManualGroupIdView();
+  updateManualPreview();
+}
+
+function updateAgGroupById(i, grupoId) {
+  const found = findGrupoById(grupoId);
+  config.agendamentos[i].grupoId = grupoId || '';
+  config.agendamentos[i].grupo = found?.nome || '';
+  config.agendamentos[i] = normalizeAg(config.agendamentos[i]);
+  renderAgs();
+}
 function getAgFilter() {
   return (document.getElementById('ag-filter')?.value || '').trim().toLowerCase();
 }
@@ -371,7 +456,7 @@ function renderAgs() {
   const all = config.agendamentos || [];
   const visible = all
     .map((agRaw, i) => ({ ag: normalizeAg(agRaw), i }))
-    .filter(item => !filter || String(item.ag.grupo || '').toLowerCase().includes(filter));
+    .filter(item => !filter || `${item.ag.grupo || ''} ${item.ag.grupoId || ''}`.toLowerCase().includes(filter));
 
   visible.forEach(({ ag, i }) => config.agendamentos[i] = ag);
 
@@ -391,6 +476,7 @@ function renderAgs() {
             </button>
             <div>
               <div class="ag-group-title">${escapeHtml(ag.grupo || 'Grupo não definido')}</div>
+              <div class="group-id-line">${escapeHtml(ag.grupoId || 'sem ID salvo')}</div>
               <div class="muted small">${escapeHtml(ag.horario)} · ${escapeHtml(daysToText(ag.diasSemana))}</div>
               <div class="next-run small"><i class="bi bi-alarm"></i> ${escapeHtml(nextRunText(ag))}</div>
             </div>
@@ -405,7 +491,10 @@ function renderAgs() {
           <div class="row g-3">
             <div class="col-lg-4">
               <label class="form-label">Grupo</label>
-              <input class="form-control" type="text" value="${escapeHtml(ag.grupo)}" list="grupos-list" placeholder="Nome exato do grupo" oninput="updateAg(${i}, 'grupo', this.value); updateAgPreview(${i})">
+              <select class="form-select" onchange="updateAgGroupById(${i}, this.value)">
+                ${groupSelectOptions(ag.grupoId, ag.grupo)}
+              </select>
+              <div class="group-select-help">${escapeHtml(ag.grupoId || 'selecione o grupo para salvar o ID real')}</div>
             </div>
             <div class="col-lg-3">
               <label class="form-label">Horário de Brasília</label>
@@ -449,7 +538,7 @@ function renderAgs() {
             <div class="col-lg-6">
               <label class="form-label">Preview da mensagem</label>
               <div class="whatsapp-preview">
-                <div class="wa-top"><div class="wa-avatar"><i class="bi bi-people-fill"></i></div><div><div class="fw-bold" id="ag-preview-grupo-${i}">${escapeHtml(ag.grupo || 'Grupo')}</div><div class="small muted">agendado às ${escapeHtml(ag.horario)}</div></div></div>
+                <div class="wa-top"><div class="wa-avatar"><i class="bi bi-people-fill"></i></div><div><div class="fw-bold" id="ag-preview-grupo-${i}">${escapeHtml(ag.grupo || 'Grupo')}</div><div class="small muted">agendado às ${escapeHtml(ag.horario)}</div><div class="group-id-line">${escapeHtml(ag.grupoId || 'sem ID')}</div></div></div>
                 <div class="wa-chat"><div class="wa-bubble" id="ag-preview-${i}">${renderMessagePreview(ag.mensagem, ag.grupo)}</div></div>
               </div>
               <div class="mono muted small mt-2">Cron gerado: <span id="cron-${i}">${escapeHtml(ag.cron)}</span></div>
@@ -507,7 +596,7 @@ function updateAgPreview(i) {
 
 function addAg() {
   const id = Date.now();
-  config.agendamentos.push({ id, grupo: '', mensagem: '', horario: '08:00', diasSemana: [1,2,3,4,5], cron: '0 8 * * 1,2,3,4,5', ativo: false });
+  config.agendamentos.push({ id, grupo: '', grupoId: '', mensagem: '', horario: '08:00', diasSemana: [1,2,3,4,5], cron: '0 8 * * 1,2,3,4,5', ativo: false });
   expandedAgs.add(id);
   renderAgs();
 }
@@ -538,6 +627,7 @@ function validateConfig() {
     const hasAnyContent = ag.grupo || ag.mensagem || ag.ativo;
     if (!hasAnyContent) return;
     if (ag.ativo && !ag.grupo) errors.push(`#${index + 1}: grupo vazio`);
+    if (ag.ativo && grupos.length && !ag.grupoId) errors.push(`#${index + 1}: selecione o grupo pela lista para salvar o ID real`);
     if (ag.ativo && !ag.mensagem) errors.push(`#${index + 1}: mensagem vazia`);
     if (!ag.horario || !/^\d{2}:\d{2}$/.test(ag.horario)) errors.push(`#${index + 1}: horário inválido`);
     if (ag.ativo && !ag.diasSemana.length) errors.push(`#${index + 1}: nenhum dia selecionado`);
@@ -565,9 +655,10 @@ async function saveConfig() {
 
 function updateManualPreview() {
   const msg = document.getElementById('manual-msg').value;
-  const grupo = document.getElementById('manual-grupo').value || 'Grupo';
-  document.getElementById('manual-preview-grupo').textContent = grupo;
-  document.getElementById('manual-preview').innerHTML = renderMessagePreview(msg, grupo);
+  const { grupo } = getManualGroup();
+  const nome = grupo || 'Grupo';
+  document.getElementById('manual-preview-grupo').textContent = nome;
+  document.getElementById('manual-preview').innerHTML = renderMessagePreview(msg, nome);
 }
 
 function dispatchInput(el) {
@@ -599,10 +690,10 @@ function insertAtCursor(id, text) {
 }
 
 document.getElementById('manual-msg').addEventListener('input', updateManualPreview);
-document.getElementById('manual-grupo').addEventListener('input', updateManualPreview);
+
 
 async function enviarManual() {
-  const grupo = document.getElementById('manual-grupo').value.trim();
+  const { grupo, grupoId } = getManualGroup();
   const mensagem = document.getElementById('manual-msg').value.trim();
   const result = document.getElementById('send-result');
   const btn = document.getElementById('btn-send');
@@ -617,7 +708,7 @@ async function enviarManual() {
   btn.disabled = true;
   btn.innerHTML = '<span class="spinner-border spinner-border-sm"></span> Aguardando conexão/envio...';
 
-  const r = await fetch('/api/enviar', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ grupo, mensagem }) });
+  const r = await fetch('/api/enviar', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ grupo, grupoId, mensagem }) });
   const d = await r.json();
 
   result.classList.remove('d-none');
@@ -641,7 +732,7 @@ async function sendAgNow(i) {
     alert('Este agendamento precisa de grupo e mensagem.');
     return;
   }
-  const r = await fetch('/api/enviar', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ grupo: ag.grupo, mensagem: ag.mensagem }) });
+  const r = await fetch('/api/enviar', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ grupo: ag.grupo, grupoId: ag.grupoId, mensagem: ag.mensagem }) });
   const d = await r.json().catch(() => ({ ok:false, msg:'Resposta inválida' }));
   showToast(d.ok ? 'Mensagem do agendamento enviada' : (d.msg || 'Erro ao enviar'));
 }
