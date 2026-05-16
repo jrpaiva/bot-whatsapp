@@ -584,13 +584,53 @@ app.post('/api/enviar', async (req, res) => {
 });
 
 app.get('/api/grupos', async (req, res) => {
+    res.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+    res.set('Pragma', 'no-cache');
+    res.set('Expires', '0');
+
     if (!clientInstance || !botConnected) return res.json([]);
+
     try {
         const chats = await clientInstance.getChats();
-        const grupos = chats
-            .filter(c => c.isGroup)
-            .map(c => ({ nome: c.name, id: c.id._serialized }))
-            .sort((a, b) => a.nome.localeCompare(b.nome));
+        const botWid = clientInstance.info?.wid?._serialized || '';
+        const botUser = String(botWid).replace('@c.us', '').replace('@lid', '');
+        const grupos = [];
+
+        for (const chat of chats) {
+            if (!chat.isGroup) continue;
+
+            const groupId = chat.id?._serialized || '';
+            const nome = chat.name || '';
+
+            try {
+                const fullChat = await clientInstance.getChatById(groupId);
+                const participants = Array.isArray(fullChat.participants) ? fullChat.participants : [];
+
+                const botAindaParticipa = !botUser || participants.length === 0
+                    ? true
+                    : participants.some(p => {
+                        const pid = String(p?.id?._serialized || p?.id?.user || p?.id || '');
+                        return pid.includes(botUser);
+                    });
+
+                if (!botAindaParticipa) {
+                    addLog('Grupos', `Ignorado porque o bot não participa mais: "${nome}" id="${groupId}"`);
+                    continue;
+                }
+
+                if (fullChat.isReadOnly === true) {
+                    addLog('Grupos', `Ignorado porque está somente leitura: "${nome}" id="${groupId}"`);
+                    continue;
+                }
+
+                grupos.push({ nome, id: groupId });
+            } catch (e) {
+                addLog('Aviso', `Falha ao validar grupo "${nome}" id="${groupId}"`, getErrorDetails(e));
+            }
+        }
+
+        grupos.sort((a, b) => a.nome.localeCompare(b.nome));
+        addLog('Grupos', `Lista atualizada com ${grupos.length} grupo(s) disponível(is).`);
         res.json(grupos);
     } catch (e) {
         addLog('Erro', 'Erro ao listar grupos', getErrorDetails(e));
@@ -616,6 +656,28 @@ app.post('/api/session/delete', async (req, res) => {
         res.json({ ok: true, msg: 'Sessão excluída do Supabase.' });
     } catch (e) {
         addLog('Erro', 'Erro ao excluir sessão', getErrorDetails(e));
+        res.status(500).json({ ok: false, msg: getErrorDetails(e) });
+    }
+});
+
+app.post('/api/session/restart', async (req, res) => {
+    try {
+        res.json({ ok: true, msg: 'Atualização iniciada. O WhatsApp será reiniciado sem apagar a sessão.' });
+        addLog('Sessão', 'Atualizando sessão local: reiniciando WhatsApp sem apagar autenticação.');
+        setTimeout(async () => {
+            try {
+                await stopBot(true);
+                await wait(1500);
+                await iniciarBot();
+                addLog('Sessão', 'Sessão local reiniciada. Aguardando conexão e lista nova de grupos.');
+            } catch (e) {
+                addLog('Erro', 'Erro ao atualizar/reiniciar sessão local', getErrorDetails(e));
+                setBotState('error', 'Erro ao atualizar sessão');
+                restarting = false;
+            }
+        }, 300);
+    } catch (e) {
+        addLog('Erro', 'Erro ao solicitar atualização da sessão', getErrorDetails(e));
         res.status(500).json({ ok: false, msg: getErrorDetails(e) });
     }
 });

@@ -162,7 +162,7 @@ body::before{content:"";position:fixed;inset:0;background-image:linear-gradient(
       <div class="modal-header">
         <div>
           <h5 class="modal-title fw-black">Gerenciar sessão do WhatsApp</h5>
-          <div class="muted small">Supabase Storage manual: salvar, excluir ou restaurar.</div>
+          <div class="muted small">Supabase Storage manual: salvar, excluir, restaurar ou atualizar a sessão local.</div>
         </div>
         <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Fechar"></button>
       </div>
@@ -175,6 +175,7 @@ body::before{content:"";position:fixed;inset:0;background-image:linear-gradient(
         <div class="d-grid gap-2">
           <button class="btn btn-wa" onclick="sessionAction('save')"><i class="bi bi-cloud-arrow-up-fill"></i> Salvar Sessão</button>
           <button class="btn btn-soft" onclick="sessionAction('restore')"><i class="bi bi-cloud-arrow-down-fill"></i> Restaurar</button>
+          <button class="btn btn-soft" onclick="sessionAction('restart')"><i class="bi bi-arrow-clockwise"></i> Atualizar sessão e grupos</button>
           <button class="btn btn-danger-soft" onclick="sessionAction('delete')"><i class="bi bi-trash3-fill"></i> Excluir Sessão</button>
         </div>
       </div>
@@ -340,13 +341,20 @@ async function loadConfig() {
 
 async function loadGrupos() {
   try {
-    const r = await fetch('/api/grupos');
+    const r = await fetch('/api/grupos?t=' + Date.now(), { cache: 'no-store' });
     const data = await r.json();
     grupos = Array.isArray(data)
-      ? data.map(g => typeof g === 'string' ? { nome: g, id: '' } : { nome: g.nome || g.name || '', id: g.id || '' }).filter(g => g.nome)
+      ? data
+          .map(g => typeof g === 'string'
+            ? { nome: g, id: '' }
+            : { nome: g.nome || g.name || '', id: g.id || '' }
+          )
+          .filter(g => g.nome && g.id)
       : [];
     refreshGroupSelects();
-  } catch(e) {}
+  } catch(e) {
+    console.error('Erro ao carregar grupos', e);
+  }
   setTimeout(loadGrupos, 15000);
 }
 
@@ -363,12 +371,16 @@ function groupSelectOptions(selectedId = '', selectedName = '') {
   let html = '<option value="">Selecione um grupo</option>';
 
   if (selectedId && !hasSelected) {
-    html += `<option value="${escapeHtml(selectedId)}" selected>${escapeHtml(selectedName || 'Grupo salvo')} — ${escapeHtml(selectedId)}</option>`;
+    html += `
+      <option value="" selected disabled>
+        ${escapeHtml(selectedName || 'Grupo removido')} — grupo não disponível
+      </option>
+    `;
   }
 
   html += grupos.map(g => {
-    const selected = g.id === selectedId || (!selectedId && selectedName && g.nome === selectedName) ? 'selected' : '';
-    return `<option value="${escapeHtml(g.id)}" ${selected}>${escapeHtml(g.nome)}${g.id ? ' — ' + escapeHtml(g.id) : ''}</option>`;
+    const selected = hasSelected && g.id === selectedId ? 'selected' : '';
+    return `<option value="${escapeHtml(g.id)}" ${selected}>${escapeHtml(g.nome)} — ${escapeHtml(g.id)}</option>`;
   }).join('');
 
   return html;
@@ -738,8 +750,8 @@ async function sendAgNow(i) {
 }
 
 async function sessionAction(action) {
-  const map = { save: '/api/session/save', restore: '/api/session/restore', delete: '/api/session/delete' };
-  const labels = { save: 'Salvando sessão...', restore: 'Restaurando sessão...', delete: 'Excluindo sessão...' };
+  const map = { save: '/api/session/save', restore: '/api/session/restore', delete: '/api/session/delete', restart: '/api/session/restart' };
+  const labels = { save: 'Salvando sessão...', restore: 'Restaurando sessão...', delete: 'Excluindo sessão...', restart: 'Atualizando sessão e grupos...' };
   const box = document.getElementById('session-result');
   box.className = 'alert alert-info';
   box.textContent = labels[action];
@@ -754,7 +766,10 @@ async function sessionAction(action) {
 
     box.className = d.ok ? 'alert alert-success' : 'alert alert-danger';
     box.textContent = d.msg || (d.ok ? 'Operação concluída.' : `Falha na operação. HTTP ${r.status}`);
-    if (d.ok) showToast(d.msg || 'Operação concluída');
+    if (d.ok) {
+      showToast(d.msg || 'Operação concluída');
+      if (action === 'restart') setTimeout(loadGrupos, 6000);
+    }
   } catch (e) {
     box.className = 'alert alert-danger';
     box.textContent = `Falha de rede ou servidor indisponível: ${e.message}`;
