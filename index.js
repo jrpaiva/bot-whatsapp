@@ -169,6 +169,50 @@ function addLog(type, msg, extra = null) {
     console.log(`[${type}] ${fullMsg}`);
 }
 
+
+function sanitizeWhatsAppMessage(text) {
+    return String(text || '')
+        .replace(/\r\n/g, '\n')
+        .replace(/\r/g, '\n')
+        .replace(/[\u200B-\u200D\uFEFF]/g, '')
+        .replace(/[^\S\n\t]+$/gm, '')
+        .trim();
+}
+
+function getBrasiliaParts() {
+    const now = new Date();
+    const fmt = new Intl.DateTimeFormat('pt-BR', {
+        timeZone: BRASILIA_TZ,
+        weekday: 'long',
+        day: '2-digit',
+        month: '2-digit',
+        year: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit'
+    });
+    const parts = Object.fromEntries(fmt.formatToParts(now).map(p => [p.type, p.value]));
+    return {
+        data: `${parts.day}/${parts.month}/${parts.year}`,
+        hora: `${parts.hour}:${parts.minute}`,
+        diaSemana: parts.weekday || '',
+        saudacao: Number(parts.hour) < 12 ? 'Bom dia' : Number(parts.hour) < 18 ? 'Boa tarde' : 'Boa noite'
+    };
+}
+
+function applyMessageVariables(message, grupo = '') {
+    const p = getBrasiliaParts();
+    const vars = {
+        grupo,
+        data: p.data,
+        hora: p.hora,
+        diaSemana: p.diaSemana,
+        saudacao: p.saudacao
+    };
+    return String(message || '').replace(/{{\s*([\w.-]+)\s*}}/g, (_, key) => {
+        return Object.prototype.hasOwnProperty.call(vars, key) ? String(vars[key]) : `{{${key}}}`;
+    });
+}
+
 process.on('uncaughtException', (err) => {
     addLog('Erro', 'Exceção não tratada', getErrorDetails(err));
     console.error(err);
@@ -185,13 +229,32 @@ function scheduleAll() {
 
     config = normalizeConfig(config);
 
+    const ativos = config.agendamentos.filter(ag => ag.ativo && ag.grupo && ag.mensagem && ag.cron);
+    addLog('Cron', `Reagendando ${ativos.length} agendamento(s) ativo(s).`);
+
     config.agendamentos.forEach(ag => {
         if (!ag.ativo || !ag.grupo || !ag.mensagem || !ag.cron) return;
         try {
             scheduledJobs[ag.id] = cron.schedule(ag.cron, async () => {
-                await enviarLembrete(ag.grupo, ag.mensagem);
+                const agora = new Date().toLocaleString('pt-BR', { timeZone: BRASILIA_TZ });
+                addLog('Cron', `Disparo iniciado: grupo="${ag.grupo}", horário="${ag.horario || 'sem horário'}", data="${agora}"`);
+                try {
+                    if (!ag.ativo) {
+                        addLog('Cron', `Ignorado porque está inativo: grupo="${ag.grupo}"`);
+                        return;
+                    }
+                    if (!ag.grupo || !ag.mensagem) {
+                        addLog('Erro', `Agendamento incompleto: grupo="${ag.grupo || 'vazio'}"`);
+                        return;
+                    }
+                    const result = await enviarLembrete(ag.grupo, ag.mensagem, { source: 'cron', agendamentoId: ag.id });
+                    if (result.ok) addLog('Cron', `Disparo finalizado com sucesso: grupo="${ag.grupo}"`);
+                    else addLog('Erro', `Disparo falhou: grupo="${ag.grupo}"`, result.msg || 'erro não informado');
+                } catch (e) {
+                    addLog('Erro', `Falha no agendamento: grupo="${ag.grupo}"`, getErrorDetails(e));
+                }
             }, { timezone: BRASILIA_TZ });
-            addLog('Cron', `Agendado: "${ag.grupo}" às ${ag.horario} [Brasília]`);
+            addLog('Cron', `Agendado: "${ag.grupo}" às ${ag.horario || 'sem horário'} [Brasília] cron="${ag.cron}" ativo=${ag.ativo ? 'sim' : 'não'}`);
         } catch (e) {
             addLog('Erro', `Cron inválido para agendamento ${ag.id}`, getErrorDetails(e));
         }
@@ -214,7 +277,7 @@ async function waitUntilReady(timeoutMs = READY_WAIT_MS) {
     return botConnected && clientInstance;
 }
 
-async function enviarLembrete(grupo, mensagem) {
+async function enviarLembrete(grupo, mensagem, meta = {}) {
     if (!clientInstance || !botConnected) {
         if (clientInstance && ['starting', 'connecting', 'authenticated', 'restoring'].includes(botState)) {
             addLog('Info', `Bot ainda não está pronto. Aguardando até ${Math.round(READY_WAIT_MS / 1000)}s antes de enviar...`);
@@ -229,12 +292,20 @@ async function enviarLembrete(grupo, mensagem) {
         }
     }
     try {
+        const mensagemFinal = sanitizeWhatsAppMessage(applyMessageVariables(mensagem, grupo));
+        if (!mensagemFinal) {
+            addLog('Erro', `Mensagem vazia após limpeza. Grupo="${grupo}"`);
+            return { ok: false, msg: 'Mensagem vazia após limpeza.' };
+        }
+
+        addLog('WhatsApp', `Tentando enviar mensagem para "${grupo}" com ${mensagemFinal.length} caracteres.`);
         const chats = await clientInstance.getChats();
         const g = chats.find(c => c.isGroup && c.name === grupo);
         if (g) {
-            await clientInstance.sendMessage(g.id._serialized, mensagem);
-            addLog('Sucesso', `Mensagem enviada para "${grupo}"`);
-            return { ok: true };
+            const sentMsg = await clientInstance.sendMessage(g.id._serialized, mensagemFinal);
+            const msgId = sentMsg?.id?._serialized || sentMsg?.id?.id || 'sem-id';
+            addLog('Sucesso', `Mensagem enviada para "${grupo}". ID=${msgId}`);
+            return { ok: true, id: msgId };
         }
         addLog('Aviso', `Grupo "${grupo}" não encontrado.`);
         return { ok: false, msg: `Grupo "${grupo}" não encontrado.` };
@@ -243,6 +314,7 @@ async function enviarLembrete(grupo, mensagem) {
         return { ok: false, msg: getErrorDetails(e) };
     }
 }
+
 
 function zipDirectory(sourceDir, outPath) {
     return new Promise((resolve, reject) => {
@@ -275,27 +347,22 @@ function requireSupabase() {
     }
 }
 
+
 async function saveConfigToSupabase() {
     requireSupabase();
-
     ensureDir(path.dirname(CONFIG_FILE));
-
     const normalized = normalizeConfig(config);
     fs.writeFileSync(CONFIG_FILE, JSON.stringify(normalized, null, 2));
-
     addLog('Config', `Enviando config para Supabase: ${SUPABASE_BUCKET}/${SUPABASE_CONFIG_PATH}`);
 
     const fileBuffer = fs.readFileSync(CONFIG_FILE);
-
     const { error } = await supabase.storage
         .from(SUPABASE_BUCKET)
         .upload(SUPABASE_CONFIG_PATH, fileBuffer, {
             contentType: 'application/json',
             upsert: true
         });
-
     if (error) throw error;
-
     addLog('Config', 'Config salva no Supabase.');
 }
 
@@ -307,46 +374,31 @@ async function restoreConfigFromSupabase() {
 
     try {
         addLog('Config', `Tentando restaurar agendamentos do Supabase: ${SUPABASE_BUCKET}/${SUPABASE_CONFIG_PATH}`);
-
         const { data, error } = await supabase.storage
             .from(SUPABASE_BUCKET)
             .download(SUPABASE_CONFIG_PATH);
 
         if (error) {
-            addLog(
-                'Config',
-                `Nenhum arquivo remoto de agendamentos encontrado em "${SUPABASE_CONFIG_PATH}". Usando config local.`,
-                getErrorDetails(error)
-            );
+            addLog('Config', `Nenhum arquivo remoto de agendamentos encontrado em "${SUPABASE_CONFIG_PATH}". Usando config local.`, getErrorDetails(error));
             return false;
         }
 
         const text = await data.text();
         const remoteConfig = normalizeConfig(JSON.parse(text));
-
         ensureDir(path.dirname(CONFIG_FILE));
         fs.writeFileSync(CONFIG_FILE, JSON.stringify(remoteConfig, null, 2));
-
         config = remoteConfig;
 
         const total = config.agendamentos.length;
         const ativos = config.agendamentos.filter(a => a.ativo).length;
         const inativos = total - ativos;
-
-        addLog(
-            'Config',
-            `Agendamentos restaurados do Supabase com sucesso. Total=${total}, ativos=${ativos}, inativos=${inativos}.`
-        );
+        addLog('Config', `Agendamentos restaurados do Supabase com sucesso. Total=${total}, ativos=${ativos}, inativos=${inativos}.`);
 
         if (total > 0) {
             config.agendamentos.forEach((ag, index) => {
-                addLog(
-                    'Config',
-                    `Restaurado #${index + 1}: grupo="${ag.grupo || 'sem grupo'}", horário="${ag.horario || 'sem horário'}", ativo=${ag.ativo ? 'sim' : 'não'}, cron="${ag.cron || 'sem cron'}"`
-                );
+                addLog('Config', `Restaurado #${index + 1}: grupo="${ag.grupo || 'sem grupo'}", horário="${ag.horario || 'sem horário'}", ativo=${ag.ativo ? 'sim' : 'não'}, cron="${ag.cron || 'sem cron'}"`);
             });
         }
-
         return true;
     } catch (e) {
         addLog('Erro', 'Erro ao restaurar agendamentos do Supabase', getErrorDetails(e));
@@ -407,7 +459,6 @@ async function restoreSessionFromSupabase() {
 
     await restoreConfigFromSupabase();
     config = loadConfig();
-
     setBotState('connecting', 'Sessão restaurada. Conectando WhatsApp...');
     await iniciarBot();
 }
@@ -468,7 +519,8 @@ app.get('/api/status', (req, res) => {
         uptimeSeconds: Math.floor(process.uptime()),
         startedAt: STARTED_AT.toISOString(),
         supabaseBucket: SUPABASE_BUCKET,
-        supabaseSessionPath: SUPABASE_SESSION_PATH
+        supabaseSessionPath: SUPABASE_SESSION_PATH,
+        supabaseConfigPath: SUPABASE_CONFIG_PATH
     });
 });
 
@@ -477,7 +529,6 @@ app.get('/api/config', (req, res) => res.json(config));
 app.post('/api/config', async (req, res) => {
     try {
         config = normalizeConfig(req.body);
-
         saveConfig(config);
 
         try {
@@ -487,7 +538,6 @@ app.post('/api/config', async (req, res) => {
         }
 
         if (botConnected) scheduleAll();
-
         addLog('Config', 'Configurações salvas.');
         res.json({ ok: true, config });
     } catch (e) {
@@ -622,6 +672,20 @@ async function iniciarBot() {
         botConnected = true;
         restarting = false;
         scheduleAll();
+    });
+
+
+    clientInstance.on('message_ack', (msg, ack) => {
+        const msgId = msg?.id?._serialized || msg?.id?.id || 'sem-id';
+        const ackStatus = {
+            '-1': 'erro',
+            '0': 'pendente',
+            '1': 'recebida pelo servidor',
+            '2': 'entregue ao dispositivo',
+            '3': 'lida',
+            '4': 'reproduzida'
+        };
+        addLog('ACK', `Mensagem ${msgId}: ${ackStatus[String(ack)] || ack}`);
     });
 
     clientInstance.on('auth_failure', (msg) => {

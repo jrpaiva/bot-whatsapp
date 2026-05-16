@@ -49,6 +49,7 @@ body::before{content:"";position:fixed;inset:0;background-image:linear-gradient(
 .status-mini.active{background:var(--green-soft);color:var(--green)}
 .status-mini.inactive{background:#ffd1661f;color:var(--yellow)}
 .filter-wrap{max-width:420px;width:100%}
+.format-toolbar{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px}.format-toolbar .btn{padding:6px 9px;border-radius:10px;font-size:.78rem}.next-run{color:var(--blue);font-weight:800}
 
 @media(max-width:768px){.app-shell{padding:14px}.days-grid{grid-template-columns:repeat(4,1fr)}.log-entry{grid-template-columns:62px 68px 1fr}.card-header-clean{align-items:flex-start;flex-direction:column}}
 </style>
@@ -107,6 +108,8 @@ body::before{content:"";position:fixed;inset:0;background-image:linear-gradient(
             <input class="form-control" id="ag-filter" placeholder="Filtrar por grupo" oninput="renderAgs()">
           </div>
         </div>
+        <button class="btn btn-soft" onclick="setAllActive(false)"><i class="bi bi-pause-fill"></i> Pausar todos</button>
+        <button class="btn btn-soft" onclick="setAllActive(true)"><i class="bi bi-play-fill"></i> Ativar todos</button>
         <button class="btn btn-soft" onclick="addAg()"><i class="bi bi-plus-lg"></i> Novo</button>
         <button class="btn btn-wa" onclick="saveConfig()"><i class="bi bi-save"></i> Salvar tudo</button>
       </div>
@@ -124,6 +127,15 @@ body::before{content:"";position:fixed;inset:0;background-image:linear-gradient(
         </div>
         <div class="mb-3">
           <label class="form-label">Mensagem</label>
+          <div class="format-toolbar">
+            <button type="button" class="btn btn-soft btn-sm" onclick="wrapTextareaSelection('manual-msg','*','*')"><i class="bi bi-type-bold"></i></button>
+            <button type="button" class="btn btn-soft btn-sm" onclick="wrapTextareaSelection('manual-msg','_','_')"><i class="bi bi-type-italic"></i></button>
+            <button type="button" class="btn btn-soft btn-sm" onclick="wrapTextareaSelection('manual-msg','~','~')"><i class="bi bi-type-strikethrough"></i></button>
+            <button type="button" class="btn btn-soft btn-sm" onclick="wrapTextareaSelection('manual-msg','```','```')"><i class="bi bi-code-slash"></i></button>
+            <button type="button" class="btn btn-soft btn-sm" onclick="insertAtCursor('manual-msg','{{saudacao}}')">Saudação</button>
+            <button type="button" class="btn btn-soft btn-sm" onclick="insertAtCursor('manual-msg','{{data}}')">Data</button>
+            <button type="button" class="btn btn-soft btn-sm" onclick="insertAtCursor('manual-msg','{{grupo}}')">Grupo</button>
+          </div>
           <textarea class="form-control" id="manual-msg" rows="7" placeholder="Digite sua mensagem aqui..."></textarea>
         </div>
         <button class="btn btn-wa w-100" id="btn-send" onclick="enviarManual()"><i class="bi bi-send-fill"></i> Enviar agora</button>
@@ -174,7 +186,7 @@ body::before{content:"";position:fixed;inset:0;background-image:linear-gradient(
 let config = { agendamentos: [] };
 let grupos = [];
 let lastLogs = [];
-const collapsedAgs = new Set();
+const expandedAgs = new Set();
 const dayLabels = [
   { id: 0, label: 'Dom' }, { id: 1, label: 'Seg' }, { id: 2, label: 'Ter' }, { id: 3, label: 'Qua' },
   { id: 4, label: 'Qui' }, { id: 5, label: 'Sex' }, { id: 6, label: 'Sáb' }
@@ -184,6 +196,44 @@ function escapeHtml(value) {
   return String(value ?? '').replace(/[&<>'"]/g, char => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[char]));
 }
 
+function sanitizeClientMessage(text) {
+  return String(text || '')
+    .replace(/\r\n/g, '\n')
+    .replace(/\r/g, '\n')
+    .replace(/[\u200B-\u200D\uFEFF]/g, '')
+    .trim();
+}
+
+function getBrasiliaPartsClient() {
+  const now = new Date();
+  const fmt = new Intl.DateTimeFormat('pt-BR', {
+    timeZone: 'America/Sao_Paulo', weekday: 'long', day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit'
+  });
+  const parts = Object.fromEntries(fmt.formatToParts(now).map(p => [p.type, p.value]));
+  const h = Number(parts.hour || 0);
+  return {
+    data: `${parts.day}/${parts.month}/${parts.year}`,
+    hora: `${parts.hour}:${parts.minute}`,
+    diaSemana: parts.weekday || '',
+    saudacao: h < 12 ? 'Bom dia' : h < 18 ? 'Boa tarde' : 'Boa noite'
+  };
+}
+
+function applyVariablesClient(message, grupo = '') {
+  const p = getBrasiliaPartsClient();
+  const vars = { grupo, data: p.data, hora: p.hora, diaSemana: p.diaSemana, saudacao: p.saudacao };
+  return String(message || '').replace(/{{\s*([\w.-]+)\s*}}/g, (_, key) => Object.prototype.hasOwnProperty.call(vars, key) ? String(vars[key]) : `{{${key}}}`);
+}
+
+function renderWhatsAppFormatting(text) {
+  let out = escapeHtml(text);
+  out = out.replace(/```([\s\S]*?)```/g, '<code>$1</code>');
+  out = out.replace(/\*([^*\n]+)\*/g, '<strong>$1</strong>');
+  out = out.replace(/_([^_\n]+)_/g, '<em>$1</em>');
+  out = out.replace(/~([^~\n]+)~/g, '<del>$1</del>');
+  return out;
+}
+
 function buildCron(horario, diasSemana) {
   const [h='12', m='00'] = String(horario || '12:00').split(':');
   const days = Array.isArray(diasSemana) && diasSemana.length ? diasSemana.join(',') : '*';
@@ -191,9 +241,9 @@ function buildCron(horario, diasSemana) {
 }
 
 function normalizeAg(ag) {
-  const dias = Array.isArray(ag.diasSemana) ? ag.diasSemana.map(Number) : [1,2,3];
+  const dias = Array.isArray(ag.diasSemana) ? ag.diasSemana.map(Number).filter(d => d >= 0 && d <= 6).sort((a,b) => a-b) : [1,2,3];
   const horario = ag.horario || '12:00';
-  return { ...ag, diasSemana: dias, horario, cron: buildCron(horario, dias) };
+  return { ...ag, id: ag.id || Date.now(), diasSemana: dias, horario, cron: buildCron(horario, dias) };
 }
 
 function showToast(text = 'Salvo com sucesso') {
@@ -280,6 +330,7 @@ async function loadConfig() {
   const r = await fetch('/api/config');
   config = await r.json();
   config.agendamentos = (config.agendamentos || []).map(normalizeAg);
+  expandedAgs.clear();
   renderAgs();
 }
 
@@ -295,6 +346,23 @@ async function loadGrupos() {
 
 function getAgFilter() {
   return (document.getElementById('ag-filter')?.value || '').trim().toLowerCase();
+}
+
+function nextRunText(ag) {
+  if (!ag.ativo || !ag.horario || !Array.isArray(ag.diasSemana) || !ag.diasSemana.length) return 'Sem próximo disparo';
+  const now = new Date();
+  const [hh, mm] = ag.horario.split(':').map(Number);
+  for (let add = 0; add <= 7; add++) {
+    const d = new Date(now);
+    d.setDate(now.getDate() + add);
+    d.setHours(hh || 0, mm || 0, 0, 0);
+    if (d <= now) continue;
+    if (ag.diasSemana.includes(d.getDay())) {
+      const label = add === 0 ? 'Hoje' : add === 1 ? 'Amanhã' : d.toLocaleDateString('pt-BR', { weekday:'long' });
+      return `${label} às ${ag.horario}`;
+    }
+  }
+  return 'Sem próximo disparo';
 }
 
 function renderAgs() {
@@ -313,7 +381,7 @@ function renderAgs() {
   }
 
   list.innerHTML = visible.map(({ ag, i }) => {
-    const isCollapsed = collapsedAgs.has(ag.id);
+    const isCollapsed = !expandedAgs.has(ag.id);
     return `
       <div class="ag-card ${ag.ativo ? 'active' : ''} ${isCollapsed ? 'collapsed' : ''}" id="ag-${ag.id}">
         <div class="ag-summary">
@@ -324,6 +392,7 @@ function renderAgs() {
             <div>
               <div class="ag-group-title">${escapeHtml(ag.grupo || 'Grupo não definido')}</div>
               <div class="muted small">${escapeHtml(ag.horario)} · ${escapeHtml(daysToText(ag.diasSemana))}</div>
+              <div class="next-run small"><i class="bi bi-alarm"></i> ${escapeHtml(nextRunText(ag))}</div>
             </div>
           </div>
           <span class="status-mini ${ag.ativo ? 'active' : 'inactive'}">
@@ -336,7 +405,7 @@ function renderAgs() {
           <div class="row g-3">
             <div class="col-lg-4">
               <label class="form-label">Grupo</label>
-              <input class="form-control" type="text" value="${escapeHtml(ag.grupo)}" list="grupos-list" placeholder="Nome exato do grupo" oninput="updateAg(${i}, 'grupo', this.value)">
+              <input class="form-control" type="text" value="${escapeHtml(ag.grupo)}" list="grupos-list" placeholder="Nome exato do grupo" oninput="updateAg(${i}, 'grupo', this.value); updateAgPreview(${i})">
             </div>
             <div class="col-lg-3">
               <label class="form-label">Horário de Brasília</label>
@@ -349,8 +418,9 @@ function renderAgs() {
                 <option value="true" ${ag.ativo ? 'selected' : ''}>Ativo</option>
               </select>
             </div>
-            <div class="col-lg-2 d-flex align-items-end">
-              <button class="btn btn-danger-soft w-100" onclick="removeAg(${i})"><i class="bi bi-trash3"></i></button>
+            <div class="col-lg-2 d-flex align-items-end gap-2">
+              <button class="btn btn-soft w-50" onclick="duplicateAg(${i})" title="Duplicar"><i class="bi bi-files"></i></button>
+              <button class="btn btn-danger-soft w-50" onclick="removeAg(${i})" title="Excluir"><i class="bi bi-trash3"></i></button>
             </div>
             <div class="col-12">
               <label class="form-label">Dias da semana</label>
@@ -365,15 +435,25 @@ function renderAgs() {
             </div>
             <div class="col-lg-6">
               <label class="form-label">Mensagem</label>
-              <textarea class="form-control" rows="6" placeholder="Mensagem a enviar" oninput="updateAg(${i}, 'mensagem', this.value); updateAgPreview(${i})">${escapeHtml(ag.mensagem)}</textarea>
+              <div class="format-toolbar">
+                <button type="button" class="btn btn-soft btn-sm" onclick="wrapTextareaSelection('ag-msg-${i}','*','*')"><i class="bi bi-type-bold"></i></button>
+                <button type="button" class="btn btn-soft btn-sm" onclick="wrapTextareaSelection('ag-msg-${i}','_','_')"><i class="bi bi-type-italic"></i></button>
+                <button type="button" class="btn btn-soft btn-sm" onclick="wrapTextareaSelection('ag-msg-${i}','~','~')"><i class="bi bi-type-strikethrough"></i></button>
+                <button type="button" class="btn btn-soft btn-sm" onclick="wrapTextareaSelection('ag-msg-${i}','\`\`\`','\`\`\`')"><i class="bi bi-code-slash"></i></button>
+                <button type="button" class="btn btn-soft btn-sm" onclick="insertAtCursor('ag-msg-${i}','{{saudacao}}')">Saudação</button>
+                <button type="button" class="btn btn-soft btn-sm" onclick="insertAtCursor('ag-msg-${i}','{{data}}')">Data</button>
+                <button type="button" class="btn btn-soft btn-sm" onclick="insertAtCursor('ag-msg-${i}','{{grupo}}')">Grupo</button>
+              </div>
+              <textarea id="ag-msg-${i}" class="form-control" rows="6" placeholder="Mensagem a enviar" oninput="updateAg(${i}, 'mensagem', this.value); updateAgPreview(${i})">${escapeHtml(ag.mensagem)}</textarea>
             </div>
             <div class="col-lg-6">
               <label class="form-label">Preview da mensagem</label>
               <div class="whatsapp-preview">
-                <div class="wa-top"><div class="wa-avatar"><i class="bi bi-people-fill"></i></div><div><div class="fw-bold">${escapeHtml(ag.grupo || 'Grupo')}</div><div class="small muted">agendado às ${escapeHtml(ag.horario)}</div></div></div>
-                <div class="wa-chat"><div class="wa-bubble" id="ag-preview-${i}">${renderMessagePreview(ag.mensagem)}</div></div>
+                <div class="wa-top"><div class="wa-avatar"><i class="bi bi-people-fill"></i></div><div><div class="fw-bold" id="ag-preview-grupo-${i}">${escapeHtml(ag.grupo || 'Grupo')}</div><div class="small muted">agendado às ${escapeHtml(ag.horario)}</div></div></div>
+                <div class="wa-chat"><div class="wa-bubble" id="ag-preview-${i}">${renderMessagePreview(ag.mensagem, ag.grupo)}</div></div>
               </div>
               <div class="mono muted small mt-2">Cron gerado: <span id="cron-${i}">${escapeHtml(ag.cron)}</span></div>
+              <button class="btn btn-soft btn-sm mt-2" onclick="sendAgNow(${i})"><i class="bi bi-send"></i> Enviar agora este agendamento</button>
             </div>
           </div>
         </div>
@@ -389,30 +469,28 @@ function daysToText(days) {
 }
 
 function toggleAgCollapse(id) {
-  collapsedAgs.has(id) ? collapsedAgs.delete(id) : collapsedAgs.add(id);
+  expandedAgs.has(id) ? expandedAgs.delete(id) : expandedAgs.add(id);
   renderAgs();
 }
 
-function renderMessagePreview(msg) {
-  if (!msg) return '<span class="wa-empty">A mensagem aparecerá aqui...</span>';
-  return `${escapeHtml(msg)}<div class="wa-time">${new Date().toLocaleTimeString('pt-BR', { hour:'2-digit', minute:'2-digit' })}</div>`;
+function renderMessagePreview(msg, grupo = '') {
+  const clean = sanitizeClientMessage(applyVariablesClient(msg, grupo));
+  if (!clean) return '<span class="wa-empty">A mensagem aparecerá aqui...</span>';
+  return `${renderWhatsAppFormatting(clean)}<div class="wa-time">${new Date().toLocaleTimeString('pt-BR', { hour:'2-digit', minute:'2-digit' })}</div>`;
 }
 
 function updateAg(i, key, val) {
   config.agendamentos[i][key] = val;
   config.agendamentos[i] = normalizeAg(config.agendamentos[i]);
-
   const cronEl = document.getElementById(`cron-${i}`);
   if (cronEl) cronEl.textContent = config.agendamentos[i].cron;
-
   const item = document.getElementById(`ag-${config.agendamentos[i].id}`);
   if (item && key === 'ativo') item.classList.toggle('active', val);
-
-  // Não renderiza novamente quando altera o horário,
-  // porque isso recria o input e tira o foco durante a digitação.
-  if (['ativo', 'diasSemana'].includes(key)) {
-    renderAgs();
+  if (key === 'grupo') {
+    const g = document.getElementById(`ag-preview-grupo-${i}`);
+    if (g) g.textContent = val || 'Grupo';
   }
+  if (['ativo','diasSemana'].includes(key)) renderAgs();
 }
 
 function toggleDay(i, day, checked) {
@@ -424,11 +502,21 @@ function toggleDay(i, day, checked) {
 
 function updateAgPreview(i) {
   const prev = document.getElementById(`ag-preview-${i}`);
-  if (prev) prev.innerHTML = renderMessagePreview(config.agendamentos[i].mensagem);
+  if (prev) prev.innerHTML = renderMessagePreview(config.agendamentos[i].mensagem, config.agendamentos[i].grupo);
 }
 
 function addAg() {
-  config.agendamentos.push({ id: Date.now(), grupo: '', mensagem: '', horario: '08:00', diasSemana: [1,2,3,4,5], cron: '0 8 * * 1,2,3,4,5', ativo: false });
+  const id = Date.now();
+  config.agendamentos.push({ id, grupo: '', mensagem: '', horario: '08:00', diasSemana: [1,2,3,4,5], cron: '0 8 * * 1,2,3,4,5', ativo: false });
+  expandedAgs.add(id);
+  renderAgs();
+}
+
+function duplicateAg(i) {
+  const ag = normalizeAg(config.agendamentos[i]);
+  const id = Date.now();
+  config.agendamentos.splice(i + 1, 0, { ...ag, id, ativo: false });
+  expandedAgs.add(id);
   renderAgs();
 }
 
@@ -437,10 +525,40 @@ function removeAg(i) {
   renderAgs();
 }
 
+function setAllActive(active) {
+  config.agendamentos = config.agendamentos.map(ag => normalizeAg({ ...ag, ativo: active }));
+  renderAgs();
+  showToast(active ? 'Todos ativados' : 'Todos pausados');
+}
+
+function validateConfig() {
+  const errors = [];
+  config.agendamentos.forEach((agRaw, index) => {
+    const ag = normalizeAg(agRaw);
+    const hasAnyContent = ag.grupo || ag.mensagem || ag.ativo;
+    if (!hasAnyContent) return;
+    if (ag.ativo && !ag.grupo) errors.push(`#${index + 1}: grupo vazio`);
+    if (ag.ativo && !ag.mensagem) errors.push(`#${index + 1}: mensagem vazia`);
+    if (!ag.horario || !/^\d{2}:\d{2}$/.test(ag.horario)) errors.push(`#${index + 1}: horário inválido`);
+    if (ag.ativo && !ag.diasSemana.length) errors.push(`#${index + 1}: nenhum dia selecionado`);
+  });
+  return errors;
+}
+
 async function saveConfig() {
   config.agendamentos = config.agendamentos.map(normalizeAg);
-  await fetch('/api/config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(config) });
-  config.agendamentos.forEach(ag => collapsedAgs.add(ag.id));
+  const errors = validateConfig();
+  if (errors.length) {
+    alert('Corrija antes de salvar:\n\n' + errors.join('\n'));
+    return;
+  }
+  const r = await fetch('/api/config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(config) });
+  const d = await r.json().catch(() => ({ ok: false, msg: 'Resposta inválida do servidor' }));
+  if (!r.ok || d.ok === false) {
+    alert(d.msg || 'Erro ao salvar configurações. Veja os logs.');
+    return;
+  }
+  expandedAgs.clear();
   renderAgs();
   showToast('Configurações salvas');
 }
@@ -449,7 +567,35 @@ function updateManualPreview() {
   const msg = document.getElementById('manual-msg').value;
   const grupo = document.getElementById('manual-grupo').value || 'Grupo';
   document.getElementById('manual-preview-grupo').textContent = grupo;
-  document.getElementById('manual-preview').innerHTML = renderMessagePreview(msg);
+  document.getElementById('manual-preview').innerHTML = renderMessagePreview(msg, grupo);
+}
+
+function dispatchInput(el) {
+  el.dispatchEvent(new Event('input', { bubbles: true }));
+}
+
+function wrapTextareaSelection(id, before, after) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  const start = el.selectionStart;
+  const end = el.selectionEnd;
+  const selected = el.value.slice(start, end) || 'texto';
+  el.value = el.value.slice(0, start) + before + selected + after + el.value.slice(end);
+  el.focus();
+  el.selectionStart = start + before.length;
+  el.selectionEnd = start + before.length + selected.length;
+  dispatchInput(el);
+}
+
+function insertAtCursor(id, text) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  const start = el.selectionStart;
+  const end = el.selectionEnd;
+  el.value = el.value.slice(0, start) + text + el.value.slice(end);
+  el.focus();
+  el.selectionStart = el.selectionEnd = start + text.length;
+  dispatchInput(el);
 }
 
 document.getElementById('manual-msg').addEventListener('input', updateManualPreview);
@@ -487,6 +633,17 @@ async function enviarManual() {
 
   btn.disabled = false;
   btn.innerHTML = '<i class="bi bi-send-fill"></i> Enviar agora';
+}
+
+async function sendAgNow(i) {
+  const ag = normalizeAg(config.agendamentos[i]);
+  if (!ag.grupo || !ag.mensagem) {
+    alert('Este agendamento precisa de grupo e mensagem.');
+    return;
+  }
+  const r = await fetch('/api/enviar', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ grupo: ag.grupo, mensagem: ag.mensagem }) });
+  const d = await r.json().catch(() => ({ ok:false, msg:'Resposta inválida' }));
+  showToast(d.ok ? 'Mensagem do agendamento enviada' : (d.msg || 'Erro ao enviar'));
 }
 
 async function sessionAction(action) {

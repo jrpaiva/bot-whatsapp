@@ -1,6 +1,6 @@
 # WA Bot — Render + Supabase + Uptime
 
-Bot de WhatsApp com painel web, envio manual, agendamento em horário de Brasília e backup manual da sessão no Supabase Storage.
+Bot de WhatsApp com painel web, envio manual, agendamento em horário de Brasília, backup manual da sessão e backup automático dos agendamentos no Supabase Storage.
 
 ## Variáveis no Render
 
@@ -11,6 +11,7 @@ SUPABASE_URL=https://SEU-PROJETO.supabase.co
 SUPABASE_SERVICE_ROLE_KEY=SUA_SERVICE_ROLE_KEY
 SUPABASE_BUCKET=whatsapp-sessions
 SUPABASE_SESSION_PATH=wwebjs_auth.zip
+SUPABASE_CONFIG_PATH=bot_config.json
 ```
 
 ## Supabase
@@ -26,7 +27,7 @@ Configuração recomendada:
 ```txt
 Public bucket: OFF
 Restrict file size: 50MB ou 100MB
-Restrict MIME types: application/zip
+Restrict MIME types: application/zip e application/json
 ```
 
 ## Endpoint para UptimeRobot / cron-job.org
@@ -68,6 +69,8 @@ O endpoint mais leve para uptime é:
 6. Aguarde o status mudar para `Conectado` antes de testar envio.
 
 ## Agendamentos
+
+Os agendamentos são salvos em `bot_config.json` no Supabase Storage quando você clica em `Salvar tudo`. Ao iniciar ou restaurar sessão, o bot tenta restaurar esses agendamentos automaticamente.
 
 Os horários são informados diretamente em horário de Brasília. O sistema gera o cron automaticamente usando:
 
