@@ -16,6 +16,8 @@ const CONFIG_FILE = process.env.BOT_CONFIG_FILE || path.join('/tmp', 'bot_config
 const BRASILIA_TZ = 'America/Sao_Paulo';
 const READY_WAIT_MS = Number(process.env.WWEBJS_READY_WAIT_MS || 45000);
 const STARTED_AT = new Date();
+const MCP_AUTH_TOKEN = process.env.MCP_AUTH_TOKEN || '';
+const MCP_ENDPOINT = process.env.MCP_ENDPOINT || '/mcp';
 
 const SUPABASE_URL = process.env.SUPABASE_URL || '';
 const SUPABASE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY || '';
@@ -559,18 +561,438 @@ async function stopBot(keepRestarting = false) {
     if (!keepRestarting) restarting = false;
 }
 
+
+// ── MCP SERVER HTTP ────────────────────────────────────────────────────────
+// Endpoint remoto simples compatível com chamadas JSON-RPC do MCP.
+// Protegido por Authorization: Bearer <MCP_AUTH_TOKEN>.
+
+function mcpAuthMiddleware(req, res, next) {
+    if (!MCP_AUTH_TOKEN) {
+        return res.status(503).json({
+            ok: false,
+            error: 'MCP_AUTH_TOKEN não configurado. Defina esta variável no Render antes de expor o MCP.'
+        });
+    }
+
+    const auth = req.headers.authorization || '';
+    const token = auth.startsWith('Bearer ') ? auth.slice(7).trim() : '';
+
+    if (token !== MCP_AUTH_TOKEN) {
+        return res.status(401).json({ ok: false, error: 'Token MCP inválido ou ausente.' });
+    }
+
+    next();
+}
+
+function jsonTextResult(data, isError = false) {
+    return {
+        content: [
+            {
+                type: 'text',
+                text: typeof data === 'string' ? data : JSON.stringify(data, null, 2)
+            }
+        ],
+        isError
+    };
+}
+
+function mcpTool(name, description, inputSchema) {
+    return { name, description, inputSchema };
+}
+
+function getMcpTools() {
+    return [
+        mcpTool('listar_status_bot', 'Lista o status atual do bot, conexão, uptime e caminhos configurados.', {
+            type: 'object', properties: {}, additionalProperties: false
+        }),
+        mcpTool('listar_grupos', 'Lista grupos disponíveis no WhatsApp com nome e ID real.', {
+            type: 'object', properties: {}, additionalProperties: false
+        }),
+        mcpTool('listar_agendamentos', 'Lista todos os agendamentos configurados.', {
+            type: 'object', properties: {}, additionalProperties: false
+        }),
+        mcpTool('criar_agendamento', 'Cria um novo agendamento. Preferencialmente use grupoId obtido em listar_grupos.', {
+            type: 'object',
+            properties: {
+                grupo: { type: 'string', description: 'Nome do grupo' },
+                grupoId: { type: 'string', description: 'ID real do grupo, exemplo 12036...@g.us' },
+                mensagem: { type: 'string' },
+                horario: { type: 'string', description: 'Horário de Brasília no formato HH:MM' },
+                diasSemana: { type: 'array', items: { type: 'number' }, description: '0=Domingo, 1=Segunda... 6=Sábado' },
+                ativo: { type: 'boolean' }
+            },
+            required: ['mensagem', 'horario'],
+            additionalProperties: false
+        }),
+        mcpTool('editar_agendamento', 'Edita um agendamento existente pelo ID.', {
+            type: 'object',
+            properties: {
+                id: { type: ['string', 'number'] },
+                grupo: { type: 'string' },
+                grupoId: { type: 'string' },
+                mensagem: { type: 'string' },
+                horario: { type: 'string' },
+                diasSemana: { type: 'array', items: { type: 'number' } },
+                ativo: { type: 'boolean' }
+            },
+            required: ['id'],
+            additionalProperties: false
+        }),
+        mcpTool('excluir_agendamento', 'Exclui um agendamento pelo ID.', {
+            type: 'object', properties: { id: { type: ['string', 'number'] } }, required: ['id'], additionalProperties: false
+        }),
+        mcpTool('ativar_agendamento', 'Ativa um agendamento pelo ID.', {
+            type: 'object', properties: { id: { type: ['string', 'number'] } }, required: ['id'], additionalProperties: false
+        }),
+        mcpTool('pausar_agendamento', 'Pausa um agendamento pelo ID.', {
+            type: 'object', properties: { id: { type: ['string', 'number'] } }, required: ['id'], additionalProperties: false
+        }),
+        mcpTool('listar_predefinidas', 'Lista mensagens predefinidas salvas.', {
+            type: 'object', properties: {}, additionalProperties: false
+        }),
+        mcpTool('criar_predefinida', 'Cria uma mensagem predefinida.', {
+            type: 'object',
+            properties: { titulo: { type: 'string' }, mensagem: { type: 'string' } },
+            required: ['mensagem'],
+            additionalProperties: false
+        }),
+        mcpTool('editar_predefinida', 'Edita uma mensagem predefinida pelo ID.', {
+            type: 'object',
+            properties: { id: { type: ['string', 'number'] }, titulo: { type: 'string' }, mensagem: { type: 'string' } },
+            required: ['id'],
+            additionalProperties: false
+        }),
+        mcpTool('excluir_predefinida', 'Exclui uma mensagem predefinida pelo ID.', {
+            type: 'object', properties: { id: { type: ['string', 'number'] } }, required: ['id'], additionalProperties: false
+        }),
+        mcpTool('enviar_mensagem_teste', 'Envia uma mensagem manual para um grupo.', {
+            type: 'object',
+            properties: { grupo: { type: 'string' }, grupoId: { type: 'string' }, mensagem: { type: 'string' } },
+            required: ['mensagem'],
+            additionalProperties: false
+        }),
+        mcpTool('listar_logs', 'Lista os logs recentes do bot.', {
+            type: 'object',
+            properties: { limite: { type: 'number', description: 'Quantidade máxima de logs, padrão 50' } },
+            additionalProperties: false
+        }),
+        mcpTool('salvar_sessao', 'Salva a sessão atual do WhatsApp no Supabase.', {
+            type: 'object', properties: {}, additionalProperties: false
+        }),
+        mcpTool('restaurar_sessao', 'Inicia a restauração da sessão do WhatsApp a partir do Supabase.', {
+            type: 'object', properties: {}, additionalProperties: false
+        }),
+        mcpTool('excluir_sessao', 'Exclui o backup da sessão do WhatsApp no Supabase.', {
+            type: 'object', properties: {}, additionalProperties: false
+        }),
+        mcpTool('atualizar_sessao_e_grupos', 'Reinicia o client do WhatsApp sem apagar a sessão, forçando nova leitura dos grupos.', {
+            type: 'object', properties: {}, additionalProperties: false
+        })
+    ];
+}
+
+function mcpStatus() {
+    return {
+        connected: botConnected,
+        state: botState,
+        status: botStatus,
+        restarting,
+        timezone: BRASILIA_TZ,
+        uptimeSeconds: Math.floor(process.uptime()),
+        startedAt: STARTED_AT.toISOString(),
+        supabaseConfigured: Boolean(supabase),
+        agendamentos: Array.isArray(config.agendamentos) ? config.agendamentos.length : 0,
+        agendamentosAtivos: Array.isArray(config.agendamentos) ? config.agendamentos.filter(a => a.ativo).length : 0
+    };
+}
+
+async function persistConfigFromMcp(logMessage = 'Config atualizada via MCP.') {
+    config = normalizeConfig(config);
+    saveConfig(config);
+    try {
+        await saveConfigToSupabase();
+    } catch (e) {
+        addLog('Erro', 'Config salva localmente via MCP, falhou no Supabase', getErrorDetails(e));
+    }
+    if (botConnected) scheduleAll();
+    addLog('MCP', logMessage);
+}
+
+function resolveGroupNameById(grupoId, fallback = '') {
+    if (!grupoId || !clientInstance || !botConnected) return fallback;
+    return fallback;
+}
+
+async function listGroupsForMcp() {
+    if (!clientInstance || !botConnected) return [];
+    const chats = await clientInstance.getChats();
+    const botIdRaw = clientInstance.info?.wid?._serialized || '';
+    const botNumber = String(botIdRaw).replace(/\D/g, '');
+    const grupos = [];
+
+    for (const chat of chats) {
+        if (!chat.isGroup) continue;
+        const groupId = chat.id?._serialized || '';
+        const nome = chat.name || '';
+        try {
+            const fullChat = await clientInstance.getChatById(groupId);
+            const participants = Array.isArray(fullChat.participants) ? fullChat.participants : [];
+            const botAindaParticipa = Boolean(botNumber) && participants.some(p => {
+                const pid = String(p?.id?._serialized || p?.id?.user || p?.id || '').replace(/\D/g, '');
+                return pid === botNumber;
+            });
+            if (!botAindaParticipa || fullChat.isReadOnly === true) continue;
+            grupos.push({ nome, id: groupId });
+        } catch (_) {}
+    }
+
+    return grupos.sort((a, b) => a.nome.localeCompare(b.nome));
+}
+
+async function callMcpTool(name, args = {}) {
+    switch (name) {
+        case 'listar_status_bot':
+            return mcpStatus();
+
+        case 'listar_grupos':
+            return await listGroupsForMcp();
+
+        case 'listar_agendamentos':
+            return normalizeConfig(config).agendamentos;
+
+        case 'criar_agendamento': {
+            const grupo = String(args.grupo || '').trim();
+            const grupoId = String(args.grupoId || '').trim();
+            if (!grupo && !grupoId) throw new Error('Informe grupo ou grupoId.');
+            if (!args.mensagem) throw new Error('Mensagem obrigatória.');
+            const ag = migrateAgendamento({
+                id: Date.now(),
+                grupo,
+                grupoId,
+                mensagem: String(args.mensagem || ''),
+                horario: String(args.horario || '08:00'),
+                diasSemana: Array.isArray(args.diasSemana) ? args.diasSemana : [1, 2, 3, 4, 5],
+                ativo: args.ativo === true
+            });
+            config = normalizeConfig(config);
+            config.agendamentos.push(ag);
+            await persistConfigFromMcp(`Agendamento criado via MCP: "${ag.grupo || ag.grupoId}"`);
+            return { ok: true, agendamento: ag, config };
+        }
+
+        case 'editar_agendamento': {
+            const id = args.id;
+            if (id === undefined || id === null || id === '') throw new Error('ID obrigatório.');
+            config = normalizeConfig(config);
+            const idx = config.agendamentos.findIndex(a => String(a.id) === String(id));
+            if (idx < 0) throw new Error(`Agendamento ${id} não encontrado.`);
+            const atual = config.agendamentos[idx];
+            config.agendamentos[idx] = migrateAgendamento({ ...atual, ...args, id: atual.id });
+            await persistConfigFromMcp(`Agendamento editado via MCP: ${id}`);
+            return { ok: true, agendamento: config.agendamentos[idx], config };
+        }
+
+        case 'excluir_agendamento': {
+            const id = args.id;
+            if (id === undefined || id === null || id === '') throw new Error('ID obrigatório.');
+            config = normalizeConfig(config);
+            const before = config.agendamentos.length;
+            config.agendamentos = config.agendamentos.filter(a => String(a.id) !== String(id));
+            if (config.agendamentos.length === before) throw new Error(`Agendamento ${id} não encontrado.`);
+            await persistConfigFromMcp(`Agendamento excluído via MCP: ${id}`);
+            return { ok: true, id, config };
+        }
+
+        case 'ativar_agendamento':
+        case 'pausar_agendamento': {
+            const id = args.id;
+            if (id === undefined || id === null || id === '') throw new Error('ID obrigatório.');
+            config = normalizeConfig(config);
+            const idx = config.agendamentos.findIndex(a => String(a.id) === String(id));
+            if (idx < 0) throw new Error(`Agendamento ${id} não encontrado.`);
+            config.agendamentos[idx].ativo = name === 'ativar_agendamento';
+            config.agendamentos[idx] = migrateAgendamento(config.agendamentos[idx]);
+            await persistConfigFromMcp(`${name === 'ativar_agendamento' ? 'Ativado' : 'Pausado'} via MCP: ${id}`);
+            return { ok: true, agendamento: config.agendamentos[idx], config };
+        }
+
+        case 'listar_predefinidas':
+            return await restorePredefinidasFromSupabase();
+
+        case 'criar_predefinida': {
+            const incoming = normalizePredefinidas([{ id: Date.now(), titulo: args.titulo || '', mensagem: args.mensagem || '' }])[0];
+            if (!incoming) throw new Error('Título ou mensagem obrigatórios.');
+            const current = await restorePredefinidasFromSupabase();
+            current.unshift(incoming);
+            const saved = await savePredefinidasToSupabase(current);
+            addLog('MCP', `Predefinida criada via MCP: "${incoming.titulo || incoming.id}"`);
+            return { ok: true, predefinida: incoming, predefinidas: saved };
+        }
+
+        case 'editar_predefinida': {
+            const id = args.id;
+            if (id === undefined || id === null || id === '') throw new Error('ID obrigatório.');
+            const current = await restorePredefinidasFromSupabase();
+            const idx = current.findIndex(p => String(p.id) === String(id));
+            if (idx < 0) throw new Error(`Predefinida ${id} não encontrada.`);
+            current[idx] = normalizePredefinidas([{ ...current[idx], ...args, id: current[idx].id }])[0];
+            const saved = await savePredefinidasToSupabase(current);
+            addLog('MCP', `Predefinida editada via MCP: ${id}`);
+            return { ok: true, predefinida: current[idx], predefinidas: saved };
+        }
+
+        case 'excluir_predefinida': {
+            const id = args.id;
+            if (id === undefined || id === null || id === '') throw new Error('ID obrigatório.');
+            const current = await restorePredefinidasFromSupabase();
+            const saved = await savePredefinidasToSupabase(current.filter(p => String(p.id) !== String(id)));
+            addLog('MCP', `Predefinida excluída via MCP: ${id}`);
+            return { ok: true, id, predefinidas: saved };
+        }
+
+        case 'enviar_mensagem_teste': {
+            const grupo = String(args.grupo || args.grupoId || '').trim();
+            const grupoId = String(args.grupoId || '').trim();
+            if ((!grupo && !grupoId) || !args.mensagem) throw new Error('Grupo/grupoId e mensagem são obrigatórios.');
+            return await enviarLembrete(grupo, String(args.mensagem), { source: 'mcp', grupoId });
+        }
+
+        case 'listar_logs': {
+            const limite = Math.min(Math.max(Number(args.limite || 50), 1), 300);
+            return logs.slice(0, limite);
+        }
+
+        case 'salvar_sessao':
+            await saveSessionToSupabase();
+            addLog('MCP', 'Sessão salva via MCP.');
+            return { ok: true, msg: 'Sessão salva no Supabase.' };
+
+        case 'restaurar_sessao':
+            restarting = true;
+            setBotState('restoring', 'Restaurando sessão do Supabase via MCP...');
+            addLog('MCP', 'Restauração de sessão iniciada via MCP.');
+            setTimeout(async () => {
+                try {
+                    await restoreSessionFromSupabase();
+                    addLog('MCP', 'Sessão restaurada via MCP.');
+                } catch (e) {
+                    addLog('Erro', 'Erro ao restaurar sessão via MCP', getErrorDetails(e));
+                    setBotState('error', 'Erro ao restaurar sessão via MCP');
+                    restarting = false;
+                }
+            }, 300);
+            return { ok: true, msg: 'Restauração iniciada. Consulte listar_status_bot/listar_logs.' };
+
+        case 'excluir_sessao':
+            await deleteSessionFromSupabase();
+            addLog('MCP', 'Sessão excluída via MCP.');
+            return { ok: true, msg: 'Sessão excluída do Supabase.' };
+
+        case 'atualizar_sessao_e_grupos':
+            addLog('MCP', 'Reinício local solicitado via MCP.');
+            setTimeout(async () => {
+                try {
+                    await stopBot(true);
+                    await wait(1500);
+                    await iniciarBot();
+                    addLog('MCP', 'Sessão local reiniciada via MCP.');
+                } catch (e) {
+                    addLog('Erro', 'Erro ao reiniciar sessão via MCP', getErrorDetails(e));
+                    setBotState('error', 'Erro ao reiniciar via MCP');
+                    restarting = false;
+                }
+            }, 300);
+            return { ok: true, msg: 'Reinício iniciado. Consulte listar_status_bot/listar_logs.' };
+
+        default:
+            throw new Error(`Ferramenta MCP desconhecida: ${name}`);
+    }
+}
+
+async function handleMcpRequest(payload) {
+    if (!payload || typeof payload !== 'object') {
+        return { jsonrpc: '2.0', id: null, error: { code: -32600, message: 'Requisição inválida.' } };
+    }
+
+    const id = payload.id ?? null;
+    const method = payload.method;
+    const params = payload.params || {};
+
+    try {
+        if (method === 'initialize') {
+            return {
+                jsonrpc: '2.0',
+                id,
+                result: {
+                    protocolVersion: params.protocolVersion || '2024-11-05',
+                    capabilities: { tools: {} },
+                    serverInfo: { name: 'bot-whatsapp-mcp', version: '1.0.0' }
+                }
+            };
+        }
+
+        if (method === 'notifications/initialized') {
+            return null;
+        }
+
+        if (method === 'tools/list') {
+            return { jsonrpc: '2.0', id, result: { tools: getMcpTools() } };
+        }
+
+        if (method === 'tools/call') {
+            const toolName = params.name;
+            const args = params.arguments || {};
+            const data = await callMcpTool(toolName, args);
+            return { jsonrpc: '2.0', id, result: jsonTextResult(data, false) };
+        }
+
+        return { jsonrpc: '2.0', id, error: { code: -32601, message: `Método não suportado: ${method}` } };
+    } catch (e) {
+        return { jsonrpc: '2.0', id, result: jsonTextResult({ ok: false, error: getErrorDetails(e) }, true) };
+    }
+}
+
 // ── ROTAS ──────────────────────────────────────────────────────────────────
 
 app.get('/api/health', (req, res) => {
     res.set('Cache-Control', 'no-store');
-    res.json({ ok: true, service: 'wa-bot', uptimeSeconds: Math.floor(process.uptime()), startedAt: STARTED_AT.toISOString(), now: new Date().toISOString(), timezone: BRASILIA_TZ, state: botState, connected: botConnected });
+    res.json({ ok: true, service: 'wa-bot', uptimeSeconds: Math.floor(process.uptime()), startedAt: STARTED_AT.toISOString(), now: new Date().toISOString(), timezone: BRASILIA_TZ, state: botState, connected: botConnected, mcpConfigured: Boolean(MCP_AUTH_TOKEN), mcpEndpoint: MCP_ENDPOINT });
 });
 
 app.get('/health', (req, res) => res.redirect('/api/health'));
 app.get('/ping', (req, res) => { res.set('Cache-Control', 'no-store'); res.status(200).send('pong'); });
 
+
+app.get(MCP_ENDPOINT, mcpAuthMiddleware, (req, res) => {
+    res.set('Cache-Control', 'no-store');
+    res.json({
+        ok: true,
+        name: 'bot-whatsapp-mcp',
+        endpoint: MCP_ENDPOINT,
+        transport: 'http-jsonrpc',
+        auth: 'Bearer token',
+        tools: getMcpTools().map(t => t.name)
+    });
+});
+
+app.post(MCP_ENDPOINT, mcpAuthMiddleware, async (req, res) => {
+    res.set('Cache-Control', 'no-store');
+    try {
+        const payload = req.body;
+        if (Array.isArray(payload)) {
+            const responses = (await Promise.all(payload.map(handleMcpRequest))).filter(Boolean);
+            return res.json(responses);
+        }
+        const response = await handleMcpRequest(payload);
+        if (!response) return res.status(202).end();
+        return res.json(response);
+    } catch (e) {
+        return res.status(500).json({ jsonrpc: '2.0', id: null, error: { code: -32000, message: getErrorDetails(e) } });
+    }
+});
+
 app.get('/api/status', (req, res) => {
-    res.json({ connected: botConnected, state: botState, status: botStatus, restarting, qr: qrCodeDataURL, timezone: 'Horário de Brasília', supabaseConfigured: Boolean(supabase), uptimeSeconds: Math.floor(process.uptime()), startedAt: STARTED_AT.toISOString(), supabaseBucket: SUPABASE_BUCKET, supabaseSessionPath: SUPABASE_SESSION_PATH, supabaseConfigPath: SUPABASE_CONFIG_PATH, supabasePredefinidasPath: SUPABASE_PREDEFINIDAS_PATH });
+    res.json({ connected: botConnected, state: botState, status: botStatus, restarting, qr: qrCodeDataURL, timezone: 'Horário de Brasília', supabaseConfigured: Boolean(supabase), uptimeSeconds: Math.floor(process.uptime()), startedAt: STARTED_AT.toISOString(), supabaseBucket: SUPABASE_BUCKET, supabaseSessionPath: SUPABASE_SESSION_PATH, supabaseConfigPath: SUPABASE_CONFIG_PATH, supabasePredefinidasPath: SUPABASE_PREDEFINIDAS_PATH, mcpConfigured: Boolean(MCP_AUTH_TOKEN), mcpEndpoint: MCP_ENDPOINT });
 });
 
 app.get('/api/config', (req, res) => res.json(config));
@@ -769,6 +1191,7 @@ app.get('/', (req, res) => res.sendFile(path.join(__dirname, 'public', 'index.ht
 app.listen(PORT, () => {
     addLog('Servidor', `Rodando na porta ${PORT}`);
     addLog('Servidor', 'Uptime disponível em /api/health');
+    addLog('Servidor', `MCP disponível em ${MCP_ENDPOINT} ${MCP_AUTH_TOKEN ? '(protegido por token)' : '(desativado: configure MCP_AUTH_TOKEN)'}`);
 });
 
 // ── WHATSAPP CLIENT ────────────────────────────────────────────────────────

@@ -84,3 +84,67 @@ America/Sao_Paulo
 npm install
 npm start
 ```
+
+## MCP remoto
+
+Esta versão inclui um endpoint MCP/JSON-RPC protegido por token para ferramentas externas controlarem o bot.
+
+Variáveis:
+
+```env
+MCP_AUTH_TOKEN=troque-por-uma-chave-grande-e-secreta
+MCP_ENDPOINT=/mcp
+```
+
+Endpoint:
+
+```txt
+https://SEU-APP.onrender.com/mcp
+```
+
+Autenticação:
+
+```http
+Authorization: Bearer SEU_MCP_AUTH_TOKEN
+```
+
+Ferramentas expostas:
+
+```txt
+listar_status_bot
+listar_grupos
+listar_agendamentos
+criar_agendamento
+editar_agendamento
+excluir_agendamento
+ativar_agendamento
+pausar_agendamento
+listar_predefinidas
+criar_predefinida
+editar_predefinida
+excluir_predefinida
+enviar_mensagem_teste
+listar_logs
+salvar_sessao
+restaurar_sessao
+excluir_sessao
+atualizar_sessao_e_grupos
+```
+
+Teste manual com curl:
+
+```bash
+curl -X POST "https://SEU-APP.onrender.com/mcp" \
+  -H "Authorization: Bearer SEU_MCP_AUTH_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}'
+```
+
+Exemplo de chamada de ferramenta:
+
+```bash
+curl -X POST "https://SEU-APP.onrender.com/mcp" \
+  -H "Authorization: Bearer SEU_MCP_AUTH_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"listar_status_bot","arguments":{}}}'
+```
