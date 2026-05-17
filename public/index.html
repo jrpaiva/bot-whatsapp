@@ -782,6 +782,26 @@ function addAg() {
   config.agendamentos.push({ id, grupo: '', grupoId: '', mensagem: '', horario: '08:00', diasSemana: [1,2,3,4,5], cron: '0 8 * * 1,2,3,4,5', ativo: false });
   expandedAgs.add(id);
   renderAgs();
+
+  setTimeout(() => {
+    const card = document.getElementById(`ag-${id}`);
+
+    if (card) {
+      card.scrollIntoView({
+        behavior: 'smooth',
+        block: 'center'
+      });
+
+      const firstField =
+        card.querySelector('select') ||
+        card.querySelector('input') ||
+        card.querySelector('textarea');
+
+      if (firstField) {
+        firstField.focus();
+      }
+    }
+  }, 150);
 }
 
 function duplicateAg(i) {
