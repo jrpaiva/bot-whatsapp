@@ -23,7 +23,7 @@ const SUPABASE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABA
 const SUPABASE_BUCKET = process.env.SUPABASE_BUCKET || 'whatsapp-sessions';
 const SUPABASE_SESSION_PATH = process.env.SUPABASE_SESSION_PATH || 'wwebjs_auth.zip';
 const SUPABASE_CONFIG_PATH = process.env.SUPABASE_CONFIG_PATH || 'bot_config.json';
-const SUPABASE_PREDEFINIDAS_PATH = 'predefinidas.json';
+const SUPABASE_PREDEFINIDAS_PATH = process.env.SUPABASE_PREDEFINIDAS_PATH || 'predefinidas.json';
 
 const supabase = SUPABASE_URL && SUPABASE_KEY ? createClient(SUPABASE_URL, SUPABASE_KEY) : null;
 
@@ -136,7 +136,7 @@ async function savePredefinidasToSupabase(list) {
         const { error } = await supabase.storage.from(SUPABASE_BUCKET)
             .upload(SUPABASE_PREDEFINIDAS_PATH, buf, { contentType: 'application/json', upsert: true });
         if (error) throw error;
-        addLog('Config', 'Predefinidas salvas no Supabase.');
+        addLog('Config', `Predefinidas salvas no Supabase: ${SUPABASE_BUCKET}/${SUPABASE_PREDEFINIDAS_PATH}.`);
     } catch (e) { addLog('Erro', 'Falha ao salvar predefinidas no Supabase', getErrorDetails(e)); }
 }
 
@@ -147,7 +147,7 @@ async function restorePredefinidasFromSupabase() {
         if (error) return;
         const list = JSON.parse(await data.text());
         savePredefinidas(list);
-        addLog('Config', `Predefinidas restauradas do Supabase. Total=${list.length}`);
+        addLog('Config', `Predefinidas restauradas do Supabase. Total=${list.length}.`);
     } catch (e) { addLog('Aviso', 'Sem predefinidas no Supabase.'); }
 }
 
@@ -336,29 +336,41 @@ async function enviarLembrete(grupo, mensagem, meta = {}) {
             function onAck(msg, ack) {
                 const mid = msg?.id?._serialized || msg?.id?.id || '';
                 if (!sentMsgId || mid !== sentMsgId) return;
-                const labels = { '-1': 'ERRO', '0': 'pendente', '1': 'enviado', '2': 'entregue', '3': 'lida' };
-                addLog('ACK', `${mid}: ${labels[String(ack)] || ack}`);
+
+                const labels = {
+                    '-1': 'erro/rejeitada',
+                    '0': 'pendente',
+                    '1': 'recebida pelo servidor do WhatsApp',
+                    '2': 'entregue ao destino',
+                    '3': 'lida',
+                    '4': 'reproduzida'
+                };
+
+                addLog('ACK', `Mensagem ${mid}: ${labels[String(ack)] || ack}`);
+
                 if (ack === -1) {
                     addLog('Erro', `ACK negativo para "${destinoNome}". Mensagem rejeitada.`);
                     finish({ ok: false, msg: `ACK negativo: mensagem rejeitada para "${destinoNome}".` });
-                } else if (ack >= 1) {
-                    addLog('Sucesso', `Confirmado para "${destinoNome}". ID=${mid}`);
-                    finish({ ok: true, id: mid, grupo: destinoNome, grupoId: destinoId });
+                } else if (ack >= 2) {
+                    addLog('Sucesso', `Mensagem entregue ao destino "${destinoNome}". ID=${mid}`);
+                    finish({ ok: true, id: mid, grupo: destinoNome, grupoId: destinoId, ack });
                 }
             }
 
             if (clientInstance) clientInstance.on('message_ack', onAck);
 
             ackTimeout = setTimeout(() => {
-                addLog('Aviso', `ACK não chegou em 15s para "${destinoNome}". Considerando enviado.`);
-                finish({ ok: true, grupo: destinoNome, grupoId: destinoId });
-            }, 15000);
+                addLog('Erro', `Mensagem NÃO confirmou entrega para "${destinoNome}" em 45s. Último ACK pode ter ficado abaixo de 2.`);
+                finish({ ok: false, msg: `Mensagem enviada ao servidor, mas não confirmou entrega no grupo "${destinoNome}".` });
+            }, 45000);
 
             try {
                 const sentMsg = await clientInstance.sendMessage(destinoId, mensagemFinal);
                 sentMsgId = sentMsg?.id?._serialized || sentMsg?.id?.id || null;
-                if (!sentMsgId) {
-                    addLog('Sucesso', `Enviado para "${destinoNome}" (sem ID de rastreio).`);
+                if (sentMsgId) {
+                    addLog('WhatsApp', `Mensagem enviada ao servidor para "${destinoNome}". ID=${sentMsgId}. Aguardando ACK 2...`);
+                } else {
+                    addLog('Aviso', `Mensagem enviada para "${destinoNome}", mas sem ID de rastreio. Não foi possível aguardar ACK.`);
                     finish({ ok: true, grupo: destinoNome, grupoId: destinoId });
                 }
             } catch (sendErr) {
@@ -571,7 +583,12 @@ app.get('/api/grupos', async (req, res) => {
 
 // ── PREDEFINIDAS ROUTES ────────────────────────────────────────────────────
 
-app.get('/api/predefinidas', (req, res) => res.json(predefinidas));
+app.get('/api/predefinidas', (req, res) => {
+    res.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+    res.set('Pragma', 'no-cache');
+    res.set('Expires', '0');
+    res.json(predefinidas);
+});
 
 app.post('/api/predefinidas', async (req, res) => {
     try {
