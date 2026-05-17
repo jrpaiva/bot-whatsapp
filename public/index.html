@@ -51,7 +51,7 @@ body::before{content:"";position:fixed;inset:0;background-image:linear-gradient(
 .status-mini.active{background:var(--green-soft);color:var(--green)}
 .status-mini.inactive{background:#ffd1661f;color:var(--yellow)}
 .filter-wrap{max-width:420px;width:100%}
-.format-toolbar{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px}.format-toolbar .btn{padding:6px 9px;border-radius:10px;font-size:.78rem}.next-run{color:var(--blue);font-weight:800}
+.format-toolbar{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px}.format-toolbar .btn{padding:6px 9px;border-radius:10px;font-size:.78rem}.next-run{color:var(--blue);font-weight:800}.predef-list{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px}.predef-card{background:#071018;border:1px solid var(--border);border-radius:16px;padding:14px;cursor:pointer;transition:.18s}.predef-card:hover{border-color:var(--green);transform:translateY(-1px)}.predef-title{font-weight:900;margin-bottom:6px}.predef-preview{color:var(--muted);font-size:.82rem;line-height:1.4;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
 
 @media(max-width:768px){.app-shell{padding:14px}.days-grid{grid-template-columns:repeat(4,1fr)}.log-entry{grid-template-columns:62px 68px 1fr}.card-header-clean{align-items:flex-start;flex-direction:column}}
 </style>
@@ -119,6 +119,18 @@ body::before{content:"";position:fixed;inset:0;background-image:linear-gradient(
     <div class="vstack gap-3" id="ag-list"></div>
   </section>
 
+
+  <section class="card-dark p-4 mb-3">
+    <div class="card-header-clean">
+      <div>
+        <h2 class="section-title">Mensagens predefinidas</h2>
+        <div class="muted small mt-1">Crie mensagens personalizadas para reutilizar nos agendamentos.</div>
+      </div>
+      <button class="btn btn-soft" onclick="openPredefModal()"><i class="bi bi-plus-lg"></i> Nova</button>
+    </div>
+    <div class="predef-list" id="predef-list"><div class="muted small">Carregando predefinidas...</div></div>
+  </section>
+
   <section class="card-dark p-4 mb-4">
     <div class="card-header-clean"><h2 class="section-title">Envio manual</h2><span class="muted small">Preview no formato de conversa do WhatsApp</span></div>
     <div class="row g-4">
@@ -140,6 +152,7 @@ body::before{content:"";position:fixed;inset:0;background-image:linear-gradient(
             <button type="button" class="btn btn-soft btn-sm" onclick="insertAtCursor('manual-msg','{{saudacao}}')">Saudação</button>
             <button type="button" class="btn btn-soft btn-sm" onclick="insertAtCursor('manual-msg','{{data}}')">Data</button>
             <button type="button" class="btn btn-soft btn-sm" onclick="insertAtCursor('manual-msg','{{grupo}}')">Grupo</button>
+            <button type="button" class="btn btn-soft btn-sm" onclick="openUsePredefModal('manual-msg')"><i class="bi bi-card-text"></i> Usar predefinida</button>
           </div>
           <textarea class="form-control" id="manual-msg" rows="7" placeholder="Digite sua mensagem aqui..."></textarea>
         </div>
@@ -184,12 +197,60 @@ body::before{content:"";position:fixed;inset:0;background-image:linear-gradient(
   </div>
 </div>
 
+
+<div class="modal fade" id="predefModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-dialog-centered modal-lg">
+    <div class="modal-content">
+      <div class="modal-header">
+        <div>
+          <h5 class="modal-title fw-black" id="predef-modal-title">Nova mensagem predefinida</h5>
+          <div class="muted small">Salve uma mensagem para reutilizar depois nos agendamentos.</div>
+        </div>
+        <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Fechar"></button>
+      </div>
+      <div class="modal-body">
+        <input type="hidden" id="predef-id">
+        <div class="mb-3">
+          <label class="form-label">Título</label>
+          <input class="form-control" id="predef-titulo" placeholder="Ex: Bom dia, aviso, lembrete...">
+        </div>
+        <div class="mb-3">
+          <label class="form-label">Mensagem</label>
+          <textarea class="form-control" id="predef-mensagem" rows="8" placeholder="Digite a mensagem predefinida..."></textarea>
+        </div>
+        <div id="predef-result" class="alert d-none mb-0"></div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-danger-soft me-auto" id="btn-delete-predef" onclick="deletePredefAtual()" style="display:none"><i class="bi bi-trash3"></i> Excluir</button>
+        <button type="button" class="btn btn-soft" data-bs-dismiss="modal">Fechar</button>
+        <button type="button" class="btn btn-wa" onclick="savePredefAtual()"><i class="bi bi-save"></i> Salvar predefinida</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="modal fade" id="usePredefModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-dialog-centered">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title fw-black">Usar predefinida</h5>
+        <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Fechar"></button>
+      </div>
+      <div class="modal-body">
+        <div class="vstack gap-2" id="use-predef-list"><div class="muted small">Nenhuma predefinida cadastrada.</div></div>
+      </div>
+    </div>
+  </div>
+</div>
+
 <div id="toast" class="toast-custom">Salvo com sucesso</div>
 
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
 <script>
 let config = { agendamentos: [] };
 let grupos = [];
+let predefinidas = [];
+let predefTargetTextareaId = null;
 let lastLogs = [];
 const expandedAgs = new Set();
 const dayLabels = [
@@ -330,6 +391,112 @@ function copyLogs() {
   navigator.clipboard.writeText(text || 'Sem logs');
   showToast('Logs copiados');
 }
+
+async function loadPredefinidas() {
+  try {
+    const r = await fetch('/api/predefinidas?t=' + Date.now(), { cache: 'no-store' });
+    predefinidas = await r.json();
+    if (!Array.isArray(predefinidas)) predefinidas = [];
+  } catch (e) {
+    predefinidas = [];
+  }
+  renderPredefinidas();
+}
+
+function renderPredefinidas() {
+  const list = document.getElementById('predef-list');
+  if (!list) return;
+  if (!predefinidas.length) {
+    list.innerHTML = '<div class="muted small">Nenhuma mensagem predefinida cadastrada.</div>';
+    return;
+  }
+  list.innerHTML = predefinidas.map(p => `
+    <div class="predef-card" onclick="openPredefModal('${escapeHtml(p.id)}')">
+      <div class="predef-title">${escapeHtml(p.titulo || 'Sem título')}</div>
+      <div class="predef-preview">${escapeHtml(p.mensagem || '')}</div>
+    </div>
+  `).join('');
+}
+
+function openPredefModal(id = '') {
+  const item = predefinidas.find(p => String(p.id) === String(id));
+  document.getElementById('predef-id').value = item?.id || '';
+  document.getElementById('predef-titulo').value = item?.titulo || '';
+  document.getElementById('predef-mensagem').value = item?.mensagem || '';
+  document.getElementById('predef-modal-title').textContent = item ? 'Editar mensagem predefinida' : 'Nova mensagem predefinida';
+  document.getElementById('btn-delete-predef').style.display = item ? 'inline-flex' : 'none';
+  const result = document.getElementById('predef-result');
+  result.className = 'alert d-none mb-0';
+  result.textContent = '';
+  bootstrap.Modal.getOrCreateInstance(document.getElementById('predefModal')).show();
+}
+
+async function savePredefAtual() {
+  const id = document.getElementById('predef-id').value;
+  const titulo = document.getElementById('predef-titulo').value.trim();
+  const mensagem = document.getElementById('predef-mensagem').value.trim();
+  const result = document.getElementById('predef-result');
+  if (!titulo && !mensagem) {
+    result.className = 'alert alert-danger mb-0';
+    result.textContent = 'Informe título ou mensagem.';
+    return;
+  }
+  const r = await fetch('/api/predefinidas', { method:'POST', headers:{ 'Content-Type':'application/json' }, body: JSON.stringify({ id: id || undefined, titulo, mensagem }) });
+  const d = await r.json().catch(() => ({ ok:false, msg:'Resposta inválida' }));
+  if (!r.ok || d.ok === false) {
+    result.className = 'alert alert-danger mb-0';
+    result.textContent = d.msg || 'Erro ao salvar predefinida.';
+    return;
+  }
+  predefinidas = d.predefinidas || predefinidas;
+  renderPredefinidas();
+  bootstrap.Modal.getOrCreateInstance(document.getElementById('predefModal')).hide();
+  showToast('Predefinida salva');
+}
+
+async function deletePredefAtual() {
+  const id = document.getElementById('predef-id').value;
+  if (!id) return;
+  const r = await fetch('/api/predefinidas/' + encodeURIComponent(id), { method:'DELETE' });
+  const d = await r.json().catch(() => ({ ok:false, msg:'Resposta inválida' }));
+  if (!r.ok || d.ok === false) {
+    const result = document.getElementById('predef-result');
+    result.className = 'alert alert-danger mb-0';
+    result.textContent = d.msg || 'Erro ao excluir predefinida.';
+    return;
+  }
+  predefinidas = d.predefinidas || [];
+  renderPredefinidas();
+  bootstrap.Modal.getOrCreateInstance(document.getElementById('predefModal')).hide();
+  showToast('Predefinida excluída');
+}
+
+function openUsePredefModal(textareaId) {
+  predefTargetTextareaId = textareaId;
+  const list = document.getElementById('use-predef-list');
+  if (!predefinidas.length) {
+    list.innerHTML = '<div class="muted small">Nenhuma predefinida cadastrada.</div>';
+  } else {
+    list.innerHTML = predefinidas.map(p => `
+      <button type="button" class="btn btn-soft text-start" onclick="usePredefinida('${escapeHtml(p.id)}')">
+        <div class="fw-bold">${escapeHtml(p.titulo || 'Sem título')}</div>
+        <div class="muted small text-truncate">${escapeHtml(p.mensagem || '')}</div>
+      </button>
+    `).join('');
+  }
+  bootstrap.Modal.getOrCreateInstance(document.getElementById('usePredefModal')).show();
+}
+
+function usePredefinida(id) {
+  const item = predefinidas.find(p => String(p.id) === String(id));
+  const el = document.getElementById(predefTargetTextareaId);
+  if (!item || !el) return;
+  el.value = item.mensagem || '';
+  dispatchInput(el);
+  bootstrap.Modal.getOrCreateInstance(document.getElementById('usePredefModal')).hide();
+  showToast('Predefinida aplicada');
+}
+
 
 async function loadConfig() {
   const r = await fetch('/api/config');
@@ -544,6 +711,7 @@ function renderAgs() {
                 <button type="button" class="btn btn-soft btn-sm" onclick="insertAtCursor('ag-msg-${i}','{{saudacao}}')">Saudação</button>
                 <button type="button" class="btn btn-soft btn-sm" onclick="insertAtCursor('ag-msg-${i}','{{data}}')">Data</button>
                 <button type="button" class="btn btn-soft btn-sm" onclick="insertAtCursor('ag-msg-${i}','{{grupo}}')">Grupo</button>
+                <button type="button" class="btn btn-soft btn-sm" onclick="openUsePredefModal('ag-msg-${i}')"><i class="bi bi-card-text"></i> Usar predefinida</button>
               </div>
               <textarea id="ag-msg-${i}" class="form-control" rows="6" placeholder="Mensagem a enviar" oninput="updateAg(${i}, 'mensagem', this.value); updateAgPreview(${i})">${escapeHtml(ag.mensagem)}</textarea>
             </div>
@@ -554,7 +722,10 @@ function renderAgs() {
                 <div class="wa-chat"><div class="wa-bubble" id="ag-preview-${i}">${renderMessagePreview(ag.mensagem, ag.grupo)}</div></div>
               </div>
               <div class="mono muted small mt-2">Cron gerado: <span id="cron-${i}">${escapeHtml(ag.cron)}</span></div>
-              <button class="btn btn-soft btn-sm mt-2" onclick="sendAgNow(${i})"><i class="bi bi-send"></i> Enviar agora este agendamento</button>
+              <div class="d-flex gap-2 flex-wrap mt-2">
+                <button class="btn btn-soft btn-sm" onclick="sendAgNow(${i})"><i class="bi bi-send"></i> Enviar agora este agendamento</button>
+                <button class="btn btn-wa btn-sm" onclick="saveOneAg(${i})"><i class="bi bi-save"></i> Salvar este</button>
+              </div>
             </div>
           </div>
         </div>
@@ -645,6 +816,32 @@ function validateConfig() {
     if (ag.ativo && !ag.diasSemana.length) errors.push(`#${index + 1}: nenhum dia selecionado`);
   });
   return errors;
+}
+
+
+async function saveOneAg(i) {
+  config.agendamentos[i] = normalizeAg(config.agendamentos[i]);
+  const ag = config.agendamentos[i];
+  const errors = [];
+  if (ag.ativo && !ag.grupo) errors.push('grupo vazio');
+  if (ag.ativo && grupos.length && !ag.grupoId) errors.push('selecione o grupo pela lista para salvar o ID real');
+  if (ag.ativo && !ag.mensagem) errors.push('mensagem vazia');
+  if (!ag.horario || !/^\d{2}:\d{2}$/.test(ag.horario)) errors.push('horário inválido');
+  if (ag.ativo && !ag.diasSemana.length) errors.push('nenhum dia selecionado');
+  if (errors.length) {
+    alert('Corrija este agendamento antes de salvar:\n\n' + errors.join('\n'));
+    return;
+  }
+  const r = await fetch('/api/agendamento', { method:'POST', headers:{ 'Content-Type':'application/json' }, body: JSON.stringify(ag) });
+  const d = await r.json().catch(() => ({ ok:false, msg:'Resposta inválida do servidor' }));
+  if (!r.ok || d.ok === false) {
+    alert(d.msg || 'Erro ao salvar este agendamento. Veja os logs.');
+    return;
+  }
+  if (d.config?.agendamentos) config.agendamentos = d.config.agendamentos.map(normalizeAg);
+  expandedAgs.delete(ag.id);
+  renderAgs();
+  showToast('Agendamento salvo');
 }
 
 async function saveConfig() {
@@ -780,6 +977,7 @@ pollStatus();
 pollLogs();
 loadConfig();
 loadGrupos();
+loadPredefinidas();
 updateManualPreview();
 </script>
 </body>

@@ -22,6 +22,8 @@ const SUPABASE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABA
 const SUPABASE_BUCKET = process.env.SUPABASE_BUCKET || 'whatsapp-sessions';
 const SUPABASE_SESSION_PATH = process.env.SUPABASE_SESSION_PATH || 'wwebjs_auth.zip';
 const SUPABASE_CONFIG_PATH = process.env.SUPABASE_CONFIG_PATH || 'bot_config.json';
+const SUPABASE_PREDEFINIDAS_PATH = process.env.SUPABASE_PREDEFINIDAS_PATH || 'predefinidas.json';
+const PREDEFINIDAS_FILE = process.env.BOT_PREDEFINIDAS_FILE || path.join('/tmp', 'predefinidas.json');
 
 const supabase = SUPABASE_URL && SUPABASE_KEY ? createClient(SUPABASE_URL, SUPABASE_KEY) : null;
 
@@ -447,6 +449,60 @@ async function restoreConfigFromSupabase() {
     }
 }
 
+function normalizePredefinidas(data) {
+    const arr = Array.isArray(data) ? data : [];
+    return arr
+        .map(item => ({
+            id: item.id || Date.now() + Math.floor(Math.random() * 1000),
+            titulo: String(item.titulo || item.nome || '').trim(),
+            mensagem: String(item.mensagem || '').trim()
+        }))
+        .filter(item => item.titulo || item.mensagem);
+}
+
+function loadPredefinidasLocal() {
+    try {
+        if (fs.existsSync(PREDEFINIDAS_FILE)) {
+            return normalizePredefinidas(JSON.parse(fs.readFileSync(PREDEFINIDAS_FILE, 'utf8')));
+        }
+    } catch (e) {
+        addLog('Erro', 'Erro ao carregar predefinidas locais', getErrorDetails(e));
+    }
+    return [];
+}
+
+function savePredefinidasLocal(predefinidas) {
+    ensureDir(path.dirname(PREDEFINIDAS_FILE));
+    fs.writeFileSync(PREDEFINIDAS_FILE, JSON.stringify(normalizePredefinidas(predefinidas), null, 2));
+}
+
+async function savePredefinidasToSupabase(predefinidas) {
+    requireSupabase();
+    const normalized = normalizePredefinidas(predefinidas);
+    savePredefinidasLocal(normalized);
+    const fileBuffer = Buffer.from(JSON.stringify(normalized, null, 2));
+    addLog('Predefinidas', `Enviando predefinidas para Supabase: ${SUPABASE_BUCKET}/${SUPABASE_PREDEFINIDAS_PATH}`);
+    const { error } = await supabase.storage.from(SUPABASE_BUCKET).upload(SUPABASE_PREDEFINIDAS_PATH, fileBuffer, { contentType: 'application/json', upsert: true });
+    if (error) throw error;
+    addLog('Predefinidas', 'Predefinidas salvas no Supabase.');
+    return normalized;
+}
+
+async function restorePredefinidasFromSupabase() {
+    if (!supabase) return loadPredefinidasLocal();
+    try {
+        const { data, error } = await supabase.storage.from(SUPABASE_BUCKET).download(SUPABASE_PREDEFINIDAS_PATH);
+        if (error) return loadPredefinidasLocal();
+        const text = await data.text();
+        const predefinidas = normalizePredefinidas(JSON.parse(text));
+        savePredefinidasLocal(predefinidas);
+        return predefinidas;
+    } catch (e) {
+        addLog('Erro', 'Erro ao restaurar predefinidas do Supabase', getErrorDetails(e));
+        return loadPredefinidasLocal();
+    }
+}
+
 async function saveSessionToSupabase() {
     requireSupabase();
     ensureDir(AUTH_DIR);
@@ -514,7 +570,7 @@ app.get('/health', (req, res) => res.redirect('/api/health'));
 app.get('/ping', (req, res) => { res.set('Cache-Control', 'no-store'); res.status(200).send('pong'); });
 
 app.get('/api/status', (req, res) => {
-    res.json({ connected: botConnected, state: botState, status: botStatus, restarting, qr: qrCodeDataURL, timezone: 'Horário de Brasília', supabaseConfigured: Boolean(supabase), uptimeSeconds: Math.floor(process.uptime()), startedAt: STARTED_AT.toISOString(), supabaseBucket: SUPABASE_BUCKET, supabaseSessionPath: SUPABASE_SESSION_PATH, supabaseConfigPath: SUPABASE_CONFIG_PATH });
+    res.json({ connected: botConnected, state: botState, status: botStatus, restarting, qr: qrCodeDataURL, timezone: 'Horário de Brasília', supabaseConfigured: Boolean(supabase), uptimeSeconds: Math.floor(process.uptime()), startedAt: STARTED_AT.toISOString(), supabaseBucket: SUPABASE_BUCKET, supabaseSessionPath: SUPABASE_SESSION_PATH, supabaseConfigPath: SUPABASE_CONFIG_PATH, supabasePredefinidasPath: SUPABASE_PREDEFINIDAS_PATH });
 });
 
 app.get('/api/config', (req, res) => res.json(config));
@@ -529,6 +585,59 @@ app.post('/api/config', async (req, res) => {
         res.json({ ok: true, config });
     } catch (e) {
         addLog('Erro', 'Erro ao salvar configurações', getErrorDetails(e));
+        res.status(500).json({ ok: false, msg: getErrorDetails(e) });
+    }
+});
+
+
+app.post('/api/agendamento', async (req, res) => {
+    try {
+        const ag = migrateAgendamento(req.body || {});
+        if (!ag.id) ag.id = Date.now();
+        const atual = normalizeConfig(config);
+        const idx = atual.agendamentos.findIndex(item => String(item.id) === String(ag.id));
+        if (idx >= 0) atual.agendamentos[idx] = ag;
+        else atual.agendamentos.push(ag);
+        config = normalizeConfig(atual);
+        saveConfig(config);
+        try { await saveConfigToSupabase(); } catch (e) { addLog('Erro', 'Agendamento salvo localmente, falhou no Supabase', getErrorDetails(e)); }
+        if (botConnected) scheduleAll();
+        addLog('Config', `Agendamento salvo individualmente: "${ag.grupo || 'sem grupo'}"`);
+        res.json({ ok: true, agendamento: ag, config });
+    } catch (e) {
+        addLog('Erro', 'Erro ao salvar agendamento individual', getErrorDetails(e));
+        res.status(500).json({ ok: false, msg: getErrorDetails(e) });
+    }
+});
+
+app.get('/api/predefinidas', async (req, res) => {
+    const predefinidas = await restorePredefinidasFromSupabase();
+    res.json(predefinidas);
+});
+
+app.post('/api/predefinidas', async (req, res) => {
+    try {
+        const incoming = normalizePredefinidas([{ ...req.body, id: req.body?.id || Date.now() }])[0];
+        if (!incoming) return res.status(400).json({ ok: false, msg: 'Título ou mensagem obrigatórios.' });
+        const current = await restorePredefinidasFromSupabase();
+        const idx = current.findIndex(item => String(item.id) === String(incoming.id));
+        if (idx >= 0) current[idx] = incoming;
+        else current.unshift(incoming);
+        const saved = await savePredefinidasToSupabase(current);
+        res.json({ ok: true, predefinida: incoming, predefinidas: saved });
+    } catch (e) {
+        addLog('Erro', 'Erro ao salvar predefinida', getErrorDetails(e));
+        res.status(500).json({ ok: false, msg: getErrorDetails(e) });
+    }
+});
+
+app.delete('/api/predefinidas/:id', async (req, res) => {
+    try {
+        const current = await restorePredefinidasFromSupabase();
+        const saved = await savePredefinidasToSupabase(current.filter(item => String(item.id) !== String(req.params.id)));
+        res.json({ ok: true, predefinidas: saved });
+    } catch (e) {
+        addLog('Erro', 'Erro ao excluir predefinida', getErrorDetails(e));
         res.status(500).json({ ok: false, msg: getErrorDetails(e) });
     }
 });
