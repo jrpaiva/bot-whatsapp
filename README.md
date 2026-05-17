@@ -12,7 +12,6 @@ SUPABASE_SERVICE_ROLE_KEY=SUA_SERVICE_ROLE_KEY
 SUPABASE_BUCKET=whatsapp-sessions
 SUPABASE_SESSION_PATH=wwebjs_auth.zip
 SUPABASE_CONFIG_PATH=bot_config.json
-SUPABASE_PREDEFINIDAS_PATH=predefinidas.json
 ```
 
 ## Supabase
@@ -84,21 +83,4 @@ America/Sao_Paulo
 ```bash
 npm install
 npm start
-```
-
-
-## Mensagens predefinidas
-
-As mensagens predefinidas são salvas no Supabase Storage em `predefinidas.json`.
-
-Fluxo:
-
-```txt
-Criar predefinida
-↓
-Salvar no Supabase
-↓
-Usar em envio manual ou agendamento
-↓
-Editar a mensagem antes de enviar/salvar
 ```
