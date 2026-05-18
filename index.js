@@ -18,6 +18,10 @@ const READY_WAIT_MS = Number(process.env.WWEBJS_READY_WAIT_MS || 45000);
 const STARTED_AT = new Date();
 const MCP_AUTH_TOKEN = process.env.MCP_AUTH_TOKEN || '';
 const MCP_ENDPOINT = process.env.MCP_ENDPOINT || '/mcp';
+const LOG_MAX_ENTRIES = Number(process.env.LOG_MAX_ENTRIES || 180);
+const LOG_AUTO_CLEAR_HOURS = Number(process.env.LOG_AUTO_CLEAR_HOURS || 12);
+const LOG_CRON_DETAILS = String(process.env.LOG_CRON_DETAILS || 'false').toLowerCase() === 'true';
+const MEMORY_WARN_MB = Number(process.env.MEMORY_WARN_MB || 450);
 
 const SUPABASE_URL = process.env.SUPABASE_URL || '';
 const SUPABASE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY || '';
@@ -141,6 +145,8 @@ let clientInstance = null;
 let scheduledJobs = {};
 let logs = [];
 let restarting = false;
+let lastLoadingLog = { bucket: null, at: 0 };
+let memoryWarningActive = false;
 
 function setBotState(state, status) {
     botState = state;
@@ -161,10 +167,55 @@ function getErrorDetails(err) {
 
 function addLog(type, msg, extra = null) {
     const fullMsg = extra ? `${msg} — ${extra}` : msg;
-    const entry = { type, msg: fullMsg, time: new Date().toLocaleTimeString('pt-BR', { timeZone: BRASILIA_TZ }) };
+    const entry = {
+        type,
+        msg: fullMsg,
+        time: new Date().toLocaleTimeString('pt-BR', { timeZone: BRASILIA_TZ })
+    };
+
     logs.unshift(entry);
-    if (logs.length > 300) logs.pop();
+
+    if (logs.length > LOG_MAX_ENTRIES) {
+        logs.length = LOG_MAX_ENTRIES;
+    }
+
     console.log(`[${type}] ${fullMsg}`);
+}
+
+function clearLogs(reason = 'manual') {
+    const removed = logs.length;
+    logs = [];
+    addLog('Sistema', `Logs limpos automaticamente. Motivo=${reason}. Removidos=${removed}. Limite atual=${LOG_MAX_ENTRIES}.`);
+}
+
+function getMemorySnapshot() {
+    const mem = process.memoryUsage();
+    const toMb = bytes => Math.round(bytes / 1024 / 1024);
+    return {
+        rssMb: toMb(mem.rss),
+        heapUsedMb: toMb(mem.heapUsed),
+        heapTotalMb: toMb(mem.heapTotal),
+        externalMb: toMb(mem.external)
+    };
+}
+
+function logMemoryIfNeeded(force = false) {
+    const mem = getMemorySnapshot();
+    const details = `rss=${mem.rssMb}MB heap=${mem.heapUsedMb}/${mem.heapTotalMb}MB external=${mem.externalMb}MB`;
+
+    if (force) {
+        addLog('Sistema', `Memória atual: ${details}`);
+        return;
+    }
+
+    if (mem.rssMb >= MEMORY_WARN_MB && !memoryWarningActive) {
+        memoryWarningActive = true;
+        addLog('Aviso', `Memória alta: ${details}. Render Free costuma reiniciar perto de 512MB.`);
+    }
+
+    if (mem.rssMb < MEMORY_WARN_MB - 60) {
+        memoryWarningActive = false;
+    }
 }
 
 function sanitizeWhatsAppMessage(text) {
@@ -209,6 +260,28 @@ process.on('unhandledRejection', (err) => {
     console.error(err);
 });
 
+process.on('SIGTERM', () => {
+    addLog('Sistema', 'Recebido SIGTERM. O ambiente está encerrando/reiniciando o serviço.');
+});
+
+process.on('SIGINT', () => {
+    addLog('Sistema', 'Recebido SIGINT. Processo interrompido.');
+});
+
+addLog('Sistema', `Processo iniciado. PID=${process.pid}. Limite de logs=${LOG_MAX_ENTRIES}. Limpeza automática=${LOG_AUTO_CLEAR_HOURS}h.`);
+logMemoryIfNeeded(true);
+
+if (LOG_AUTO_CLEAR_HOURS > 0) {
+    setInterval(() => {
+        clearLogs(`${LOG_AUTO_CLEAR_HOURS}h`);
+        logMemoryIfNeeded(true);
+    }, LOG_AUTO_CLEAR_HOURS * 60 * 60 * 1000);
+}
+
+setInterval(() => {
+    logMemoryIfNeeded(false);
+}, 5 * 60 * 1000);
+
 function scheduleAll() {
     Object.values(scheduledJobs).forEach(j => j.stop());
     scheduledJobs = {};
@@ -232,7 +305,9 @@ function scheduleAll() {
                     addLog('Erro', `Falha no agendamento: "${ag.grupo}"`, getErrorDetails(e));
                 }
             }, { timezone: BRASILIA_TZ });
-            addLog('Cron', `Agendado: "${ag.grupo}" às ${ag.horario || '?'} [Brasília] cron="${ag.cron}"`);
+            if (LOG_CRON_DETAILS) {
+                addLog('Cron', `Agendado: "${ag.grupo}" às ${ag.horario || '?'} [Brasília] cron="${ag.cron}"`);
+            }
         } catch (e) {
             addLog('Erro', `Cron inválido para agendamento ${ag.id}`, getErrorDetails(e));
         }
@@ -1066,6 +1141,15 @@ app.delete('/api/predefinidas/:id', async (req, res) => {
 
 app.get('/api/logs', (req, res) => res.json(logs));
 
+app.post('/api/logs/clear', (req, res) => {
+    clearLogs('requisição manual');
+    res.json({ ok: true, logs });
+});
+
+app.get('/api/memory', (req, res) => {
+    res.json({ ok: true, memory: getMemorySnapshot(), limitHintMb: 512, warningAtMb: MEMORY_WARN_MB });
+});
+
 app.post('/api/enviar', async (req, res) => {
     const { grupo, grupoId, mensagem } = req.body;
     if ((!grupo && !grupoId) || !mensagem) return res.json({ ok: false, msg: 'Grupo e mensagem obrigatórios.' });
@@ -1214,8 +1298,17 @@ async function iniciarBot() {
     });
 
     clientInstance.on('loading_screen', (percent, message) => {
-        setBotState('connecting', `Carregando WhatsApp ${percent || 0}%...`);
-        addLog('WhatsApp', `Carregando ${percent || 0}%`, message || '');
+        const p = Number(percent || 0);
+        setBotState('connecting', `Carregando WhatsApp ${p}%...`);
+
+        // Evita dezenas de logs durante o carregamento do WhatsApp.
+        // Registra apenas marcos relevantes ou no máximo 1 vez por minuto.
+        const bucket = p >= 99 ? 99 : p >= 95 ? 95 : Math.floor(p / 25) * 25;
+        const now = Date.now();
+        if (bucket !== lastLoadingLog.bucket || now - lastLoadingLog.at > 60000) {
+            lastLoadingLog = { bucket, at: now };
+            addLog('WhatsApp', `Carregando ${p}%`, message || '');
+        }
     });
 
     clientInstance.on('authenticated', () => {

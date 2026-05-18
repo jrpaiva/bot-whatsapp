@@ -148,3 +148,25 @@ curl -X POST "https://SEU-APP.onrender.com/mcp" \
   -H "Content-Type: application/json" \
   -d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"listar_status_bot","arguments":{}}}'
 ```
+
+## Ajustes de logs e memória
+
+Esta versão reduz o volume de logs em memória e ajuda a diagnosticar quedas por RAM no Render Free.
+
+Variáveis opcionais:
+
+```env
+LOG_MAX_ENTRIES=180
+LOG_AUTO_CLEAR_HOURS=12
+LOG_CRON_DETAILS=false
+MEMORY_WARN_MB=450
+```
+
+Endpoints úteis:
+
+```txt
+GET  /api/memory
+POST /api/logs/clear
+```
+
+Por padrão, os logs são limpos automaticamente a cada 12 horas e o sistema mantém no máximo 180 entradas em memória.
