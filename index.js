@@ -40,20 +40,14 @@ function ensureDir(dir) {
     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 }
 
+// ── CONFIG ─────────────────────────────────────────────────────────────────
+
 function getDefaultConfig() {
     return {
-        agendamentos: [
-            {
-                id: 1,
-                grupo: '',
-                grupoId: '',
-                mensagem: '',
-                cron: '0 12 * * 1-3',
-                diasSemana: [1, 2, 3],
-                horario: '12:00',
-                ativo: false
-            }
-        ]
+        agendamentos: [{
+            id: 1, grupo: '', grupoId: '', mensagem: '',
+            cron: '0 12 * * 1-3', diasSemana: [1, 2, 3], horario: '12:00', ativo: false
+        }]
     };
 }
 
@@ -77,10 +71,8 @@ function parseCron(expr) {
     if (parts.length < 5) return fallback;
     const minute = Number(parts[0]);
     const hour = Number(parts[1]);
-    const daysExpr = parts[4];
     const horario = `${String(Number.isFinite(hour) ? hour : 12).padStart(2, '0')}:${String(Number.isFinite(minute) ? minute : 0).padStart(2, '0')}`;
-    const diasSemana = parseDays(daysExpr);
-    return { horario, diasSemana };
+    return { horario, diasSemana: parseDays(parts[4]) };
 }
 
 function parseDays(daysExpr) {
@@ -89,9 +81,8 @@ function parseDays(daysExpr) {
     String(daysExpr).split(',').forEach(part => {
         if (part.includes('-')) {
             const [start, end] = part.split('-').map(Number);
-            if (Number.isInteger(start) && Number.isInteger(end)) {
+            if (Number.isInteger(start) && Number.isInteger(end))
                 for (let d = start; d <= end; d++) days.add(d);
-            }
         } else {
             const d = Number(part);
             if (Number.isInteger(d)) days.add(d);
@@ -118,12 +109,9 @@ function normalizeConfig(cfg) {
 
 function loadConfig() {
     try {
-        if (fs.existsSync(CONFIG_FILE)) {
+        if (fs.existsSync(CONFIG_FILE))
             return normalizeConfig(JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8')));
-        }
-    } catch (e) {
-        console.error('[Config] Erro ao carregar:', e.message);
-    }
+    } catch (e) { console.error('[Config] Erro ao carregar:', e.message); }
     return getDefaultConfig();
 }
 
@@ -131,10 +119,10 @@ function saveConfig(cfg) {
     try {
         ensureDir(path.dirname(CONFIG_FILE));
         fs.writeFileSync(CONFIG_FILE, JSON.stringify(normalizeConfig(cfg), null, 2));
-    } catch (e) {
-        console.error('[Config] Erro ao salvar:', e.message);
-    }
+    } catch (e) { console.error('[Config] Erro ao salvar:', e.message); }
 }
+
+// ── STATE ──────────────────────────────────────────────────────────────────
 
 let config = loadConfig();
 let qrCodeDataURL = null;
@@ -147,6 +135,21 @@ let logs = [];
 let restarting = false;
 let lastLoadingLog = { bucket: null, at: 0 };
 let memoryWarningActive = false;
+
+// ── FIX #1: Cache de grupos para evitar getChats() concorrentes e erros de timing
+// O cache é invalidado ao reconectar ou após GRUPOS_CACHE_TTL_MS
+const GRUPOS_CACHE_TTL_MS = 2 * 60 * 1000; // 2 minutos
+let gruposCache = { list: null, at: 0, building: false };
+
+function invalidateGruposCache() {
+    gruposCache = { list: null, at: 0, building: false };
+}
+
+// ── FIX #2: Guard centralizado — qualquer chamada a clientInstance passa por aqui
+function getClient() {
+    if (!clientInstance || !botConnected) return null;
+    return clientInstance;
+}
 
 function setBotState(state, status) {
     botState = state;
@@ -167,71 +170,46 @@ function getErrorDetails(err) {
 
 function addLog(type, msg, extra = null) {
     const fullMsg = extra ? `${msg} — ${extra}` : msg;
-    const entry = {
-        type,
-        msg: fullMsg,
-        time: new Date().toLocaleTimeString('pt-BR', { timeZone: BRASILIA_TZ })
-    };
-
-    logs.unshift(entry);
-
-    if (logs.length > LOG_MAX_ENTRIES) {
-        logs.length = LOG_MAX_ENTRIES;
-    }
-
+    logs.unshift({ type, msg: fullMsg, time: new Date().toLocaleTimeString('pt-BR', { timeZone: BRASILIA_TZ }) });
+    if (logs.length > LOG_MAX_ENTRIES) logs.length = LOG_MAX_ENTRIES;
     console.log(`[${type}] ${fullMsg}`);
 }
 
 function clearLogs(reason = 'manual') {
     const removed = logs.length;
     logs = [];
-    addLog('Sistema', `Logs limpos automaticamente. Motivo=${reason}. Removidos=${removed}. Limite atual=${LOG_MAX_ENTRIES}.`);
+    addLog('Sistema', `Logs limpos. Motivo=${reason}. Removidos=${removed}.`);
 }
 
 function getMemorySnapshot() {
     const mem = process.memoryUsage();
-    const toMb = bytes => Math.round(bytes / 1024 / 1024);
-    return {
-        rssMb: toMb(mem.rss),
-        heapUsedMb: toMb(mem.heapUsed),
-        heapTotalMb: toMb(mem.heapTotal),
-        externalMb: toMb(mem.external)
-    };
+    const toMb = b => Math.round(b / 1024 / 1024);
+    return { rssMb: toMb(mem.rss), heapUsedMb: toMb(mem.heapUsed), heapTotalMb: toMb(mem.heapTotal), externalMb: toMb(mem.external) };
 }
 
 function logMemoryIfNeeded(force = false) {
     const mem = getMemorySnapshot();
     const details = `rss=${mem.rssMb}MB heap=${mem.heapUsedMb}/${mem.heapTotalMb}MB external=${mem.externalMb}MB`;
-
-    if (force) {
-        addLog('Sistema', `Memória atual: ${details}`);
-        return;
-    }
-
+    if (force) { addLog('Sistema', `Memória: ${details}`); return; }
     if (mem.rssMb >= MEMORY_WARN_MB && !memoryWarningActive) {
         memoryWarningActive = true;
-        addLog('Aviso', `Memória alta: ${details}. Render Free costuma reiniciar perto de 512MB.`);
+        addLog('Aviso', `Memória alta: ${details}.`);
     }
-
-    if (mem.rssMb < MEMORY_WARN_MB - 60) {
-        memoryWarningActive = false;
-    }
+    if (mem.rssMb < MEMORY_WARN_MB - 60) memoryWarningActive = false;
 }
 
 function sanitizeWhatsAppMessage(text) {
     return String(text || '')
-        .replace(/\r\n/g, '\n')
-        .replace(/\r/g, '\n')
+        .replace(/\r\n/g, '\n').replace(/\r/g, '\n')
         .replace(/[\u200B-\u200D\uFEFF]/g, '')
-        .replace(/[^\S\n\t]+$/gm, '')
-        .trim();
+        .replace(/[^\S\n\t]+$/gm, '').trim();
 }
 
 function getBrasiliaParts() {
     const now = new Date();
     const fmt = new Intl.DateTimeFormat('pt-BR', {
-        timeZone: BRASILIA_TZ,
-        weekday: 'long', day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit'
+        timeZone: BRASILIA_TZ, weekday: 'long', day: '2-digit',
+        month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit'
     });
     const parts = Object.fromEntries(fmt.formatToParts(now).map(p => [p.type, p.value]));
     return {
@@ -245,42 +223,25 @@ function getBrasiliaParts() {
 function applyMessageVariables(message, grupo = '') {
     const p = getBrasiliaParts();
     const vars = { grupo, data: p.data, hora: p.hora, diaSemana: p.diaSemana, saudacao: p.saudacao };
-    return String(message || '').replace(/{{\s*([\w.-]+)\s*}}/g, (_, key) => {
-        return Object.prototype.hasOwnProperty.call(vars, key) ? String(vars[key]) : `{{${key}}}`;
-    });
+    return String(message || '').replace(/{{\s*([\w.-]+)\s*}}/g, (_, key) =>
+        Object.prototype.hasOwnProperty.call(vars, key) ? String(vars[key]) : `{{${key}}}`
+    );
 }
 
-process.on('uncaughtException', (err) => {
-    addLog('Erro', 'Exceção não tratada', getErrorDetails(err));
-    console.error(err);
-});
-
-process.on('unhandledRejection', (err) => {
-    addLog('Erro', 'Promise rejeitada sem tratamento', getErrorDetails(err));
-    console.error(err);
-});
-
-process.on('SIGTERM', () => {
-    addLog('Sistema', 'Recebido SIGTERM. O ambiente está encerrando/reiniciando o serviço.');
-});
-
-process.on('SIGINT', () => {
-    addLog('Sistema', 'Recebido SIGINT. Processo interrompido.');
-});
+process.on('uncaughtException', (err) => { addLog('Erro', 'Exceção não tratada', getErrorDetails(err)); console.error(err); });
+process.on('unhandledRejection', (err) => { addLog('Erro', 'Promise rejeitada sem tratamento', getErrorDetails(err)); console.error(err); });
+process.on('SIGTERM', () => { addLog('Sistema', 'Recebido SIGTERM.'); });
+process.on('SIGINT', () => { addLog('Sistema', 'Recebido SIGINT.'); });
 
 addLog('Sistema', `Processo iniciado. PID=${process.pid}. Limite de logs=${LOG_MAX_ENTRIES}. Limpeza automática=${LOG_AUTO_CLEAR_HOURS}h.`);
 logMemoryIfNeeded(true);
 
 if (LOG_AUTO_CLEAR_HOURS > 0) {
-    setInterval(() => {
-        clearLogs(`${LOG_AUTO_CLEAR_HOURS}h`);
-        logMemoryIfNeeded(true);
-    }, LOG_AUTO_CLEAR_HOURS * 60 * 60 * 1000);
+    setInterval(() => { clearLogs(`${LOG_AUTO_CLEAR_HOURS}h`); logMemoryIfNeeded(true); }, LOG_AUTO_CLEAR_HOURS * 60 * 60 * 1000);
 }
+setInterval(() => logMemoryIfNeeded(false), 5 * 60 * 1000);
 
-setInterval(() => {
-    logMemoryIfNeeded(false);
-}, 5 * 60 * 1000);
+// ── CRON ───────────────────────────────────────────────────────────────────
 
 function scheduleAll() {
     Object.values(scheduledJobs).forEach(j => j.stop());
@@ -294,23 +255,17 @@ function scheduleAll() {
         try {
             scheduledJobs[ag.id] = cron.schedule(ag.cron, async () => {
                 const agora = new Date().toLocaleString('pt-BR', { timeZone: BRASILIA_TZ });
-                addLog('Cron', `Disparo: grupo="${ag.grupo}", id="${ag.grupoId || 'sem id'}", horário="${ag.horario || ''}", data="${agora}"`);
+                addLog('Cron', `Disparo: grupo="${ag.grupo}", id="${ag.grupoId || 'sem id'}", data="${agora}"`);
                 try {
                     if (!ag.ativo) { addLog('Cron', `Ignorado (inativo): "${ag.grupo}"`); return; }
                     if (!ag.grupo || !ag.mensagem) { addLog('Erro', `Agendamento incompleto: "${ag.grupo || 'vazio'}"`); return; }
                     const result = await enviarLembrete(ag.grupo, ag.mensagem, { source: 'cron', agendamentoId: ag.id, grupoId: ag.grupoId });
                     if (result.ok) addLog('Cron', `Disparo OK: "${ag.grupo}"`);
                     else addLog('Erro', `Disparo falhou: "${ag.grupo}"`, result.msg || 'erro não informado');
-                } catch (e) {
-                    addLog('Erro', `Falha no agendamento: "${ag.grupo}"`, getErrorDetails(e));
-                }
+                } catch (e) { addLog('Erro', `Falha no agendamento: "${ag.grupo}"`, getErrorDetails(e)); }
             }, { timezone: BRASILIA_TZ });
-            if (LOG_CRON_DETAILS) {
-                addLog('Cron', `Agendado: "${ag.grupo}" às ${ag.horario || '?'} [Brasília] cron="${ag.cron}"`);
-            }
-        } catch (e) {
-            addLog('Erro', `Cron inválido para agendamento ${ag.id}`, getErrorDetails(e));
-        }
+            if (LOG_CRON_DETAILS) addLog('Cron', `Agendado: "${ag.grupo}" às ${ag.horario || '?'} [Brasília] cron="${ag.cron}"`);
+        } catch (e) { addLog('Erro', `Cron inválido: ${ag.id}`, getErrorDetails(e)); }
     });
 }
 
@@ -321,16 +276,77 @@ async function waitUntilReady(timeoutMs = READY_WAIT_MS) {
     const started = Date.now();
     while (Date.now() - started < timeoutMs) {
         if (botConnected && clientInstance) return true;
-        if (!clientInstance || botState === 'qr' || botState === 'error' || botState === 'auth_failure' || botState === 'disconnected') return false;
+        if (!clientInstance || ['qr', 'error', 'auth_failure', 'disconnected'].includes(botState)) return false;
         await wait(1000);
     }
-    return botConnected && clientInstance;
+    return botConnected && !!clientInstance;
 }
 
-// ── FUNÇÃO CORRIGIDA: valida participação e rastreia ACK ───────────────────
+// ── FIX #3: listGroups com cache + guard contra race condition ─────────────
+// Problema original: getChats() era chamado concorrentemente (poll do painel + MCP + enviarLembrete)
+// enquanto o client estava sendo reiniciado → "Requesting main frame too early" e "Target closed"
+async function listGroupsInternal() {
+    const client = getClient();
+    if (!client) return [];
+
+    // Retorna cache se ainda válido
+    if (gruposCache.list && (Date.now() - gruposCache.at) < GRUPOS_CACHE_TTL_MS) {
+        return gruposCache.list;
+    }
+
+    // Se já está construindo, aguarda até 8s
+    if (gruposCache.building) {
+        const deadline = Date.now() + 8000;
+        while (gruposCache.building && Date.now() < deadline) await wait(200);
+        if (gruposCache.list) return gruposCache.list;
+        return [];
+    }
+
+    gruposCache.building = true;
+    try {
+        // Double-check: client ainda válido após aguardar lock
+        if (!getClient()) { gruposCache.building = false; return []; }
+
+        const chats = await clientInstance.getChats();
+        const botNumber = String(clientInstance.info?.wid?._serialized || '').replace(/\D/g, '');
+        const grupos = [];
+
+        for (const chat of chats) {
+            if (!chat.isGroup) continue;
+            const groupId = chat.id?._serialized || '';
+            const nome = chat.name || '';
+
+            // Guard contra client destruído durante iteração
+            if (!getClient()) break;
+
+            try {
+                const fullChat = await clientInstance.getChatById(groupId);
+                const participants = Array.isArray(fullChat.participants) ? fullChat.participants : [];
+                const participa = Boolean(botNumber) && participants.some(p =>
+                    String(p?.id?._serialized || p?.id?.user || p?.id || '').replace(/\D/g, '') === botNumber
+                );
+                if (!participa || fullChat.isReadOnly === true) continue;
+                grupos.push({ nome, id: groupId });
+            } catch (e) {
+                // Ignora erros individuais de grupo — não loga para evitar spam
+            }
+        }
+
+        grupos.sort((a, b) => a.nome.localeCompare(b.nome));
+        gruposCache = { list: grupos, at: Date.now(), building: false };
+        return grupos;
+    } catch (e) {
+        gruposCache.building = false;
+        throw e;
+    }
+}
+
+// ── ENVIAR ─────────────────────────────────────────────────────────────────
+
 async function enviarLembrete(grupo, mensagem, meta = {}) {
     const grupoId = meta.grupoId || '';
 
+    // FIX #4: Checar botConnected E clientInstance antes de qualquer operação
     if (!clientInstance || !botConnected) {
         if (clientInstance && ['starting', 'connecting', 'authenticated', 'restoring'].includes(botState)) {
             addLog('Info', `Bot ainda não pronto. Aguardando até ${Math.round(READY_WAIT_MS / 1000)}s...`);
@@ -347,68 +363,54 @@ async function enviarLembrete(grupo, mensagem, meta = {}) {
 
     try {
         const mensagemFinal = sanitizeWhatsAppMessage(applyMessageVariables(mensagem, grupo));
-        if (!mensagemFinal) {
-            addLog('Erro', `Mensagem vazia após limpeza. Grupo="${grupo}"`);
-            return { ok: false, msg: 'Mensagem vazia após limpeza.' };
-        }
+        if (!mensagemFinal) return { ok: false, msg: 'Mensagem vazia após limpeza.' };
 
         addLog('WhatsApp', `Tentando enviar para "${grupo}"${grupoId ? ` id="${grupoId}"` : ''}`);
 
-        // ── 1. Resolve o destino ──────────────────────────────────────────
+        // 1. Resolve destino
         let destinoId = grupoId || null;
         let destinoNome = grupo;
 
         if (!destinoId) {
-            // Sem ID salvo: busca pelo nome (risco de cache, avisa)
+            if (!getClient()) return { ok: false, msg: 'Bot desconectou durante resolução do grupo.' };
             const chats = await clientInstance.getChats();
             const matches = chats.filter(c => c.isGroup && c.name === grupo);
-            if (matches.length > 1) {
-                addLog('Aviso', `${matches.length} grupos com nome "${grupo}". Salve o ID correto no painel.`);
-            }
-            const g = matches[0];
-            if (!g) {
-                addLog('Aviso', `Grupo "${grupo}" não encontrado em getChats().`);
-                return { ok: false, msg: `Grupo "${grupo}" não encontrado.` };
-            }
-            destinoId = g.id._serialized;
-            destinoNome = g.name;
+            if (matches.length > 1) addLog('Aviso', `${matches.length} grupos com nome "${grupo}". Salve o ID correto.`);
+            if (!matches[0]) { addLog('Aviso', `Grupo "${grupo}" não encontrado.`); return { ok: false, msg: `Grupo "${grupo}" não encontrado.` }; }
+            destinoId = matches[0].id._serialized;
+            destinoNome = matches[0].name;
         }
 
-        // ── 2. Valida participação ANTES de enviar ────────────────────────
+        // 2. Valida participação
+        if (!getClient()) return { ok: false, msg: 'Bot desconectou antes de validar o grupo.' };
         try {
             const chatObj = await clientInstance.getChatById(destinoId);
-            const botIdRaw = clientInstance.info?.wid?._serialized || '';
-            const botNumber = String(botIdRaw).replace(/\D/g, '');
+            const botNumber = String(clientInstance.info?.wid?._serialized || '').replace(/\D/g, '');
 
             if (chatObj && Array.isArray(chatObj.participants) && botNumber) {
-                const aindaParticipa = chatObj.participants.some(p => {
-                    const pid = String(
-                        p?.id?._serialized || p?.id?.user || p?.id || ''
-                    ).replace(/\D/g, '');
-                    return pid === botNumber;
-                });
-
-                if (!aindaParticipa) {
-                    addLog('Erro', `Bot NÃO está mais no grupo "${destinoNome}" (${destinoId}). Remova ou corrija o agendamento.`);
+                const participa = chatObj.participants.some(p =>
+                    String(p?.id?._serialized || p?.id?.user || p?.id || '').replace(/\D/g, '') === botNumber
+                );
+                if (!participa) {
+                    addLog('Erro', `Bot NÃO está mais no grupo "${destinoNome}" (${destinoId}). Corrija o agendamento.`);
                     return { ok: false, msg: `Bot foi removido do grupo "${destinoNome}". Corrija o agendamento.` };
                 }
             }
-
             if (chatObj?.isReadOnly === true) {
                 addLog('Erro', `Grupo "${destinoNome}" está somente leitura.`);
                 return { ok: false, msg: `Grupo "${destinoNome}" está somente leitura.` };
             }
-
             destinoNome = chatObj?.name || destinoNome;
         } catch (validErr) {
-            // getChatById pode falhar para IDs completamente inválidos
-            addLog('Aviso', `Não foi possível validar grupo "${destinoNome}" (${destinoId}): ${getErrorDetails(validErr)}. Abortando por segurança.`);
-            return { ok: false, msg: `Grupo "${destinoNome}" parece inválido ou inexistente: ${getErrorDetails(validErr)}` };
+            addLog('Aviso', `Não foi possível validar grupo "${destinoNome}": ${getErrorDetails(validErr)}. Abortando.`);
+            return { ok: false, msg: `Grupo "${destinoNome}" parece inválido: ${getErrorDetails(validErr)}` };
         }
 
-        addLog('WhatsApp', `Destino validado: nome="${destinoNome}", id="${destinoId}"`);
+        addLog('WhatsApp', `Destino validado: "${destinoNome}" (${destinoId})`);
 
-        // ── 3. Envia e aguarda ACK para confirmar sucesso ─────────────────
+        // 3. Envia e rastreia ACK
+        if (!getClient()) return { ok: false, msg: 'Bot desconectou antes de enviar.' };
+
         return await new Promise(async (resolve) => {
             let resolved = false;
             let ackTimeout = null;
@@ -418,44 +420,41 @@ async function enviarLembrete(grupo, mensagem, meta = {}) {
                 if (resolved) return;
                 resolved = true;
                 if (ackTimeout) clearTimeout(ackTimeout);
-                if (clientInstance) clientInstance.removeListener('message_ack', onAck);
+                try { if (clientInstance) clientInstance.removeListener('message_ack', onAck); } catch (_) {}
                 resolve(result);
             }
 
             function onAck(msg, ack) {
                 const mid = msg?.id?._serialized || msg?.id?.id || '';
                 if (!sentMsgId || mid !== sentMsgId) return;
-
-                const ackLabels = { '-1': 'ERRO', '0': 'pendente', '1': 'enviado ao servidor', '2': 'entregue', '3': 'lida', '4': 'reproduzida' };
-                addLog('ACK', `Mensagem ${mid}: ${ackLabels[String(ack)] || ack}`);
-
+                const labels = { '-1': 'ERRO', '0': 'pendente', '1': 'enviado', '2': 'entregue', '3': 'lida', '4': 'reproduzida' };
+                addLog('ACK', `${mid}: ${labels[String(ack)] || ack}`);
                 if (ack === -1) {
-                    addLog('Erro', `ACK negativo para "${destinoNome}" (${destinoId}). Mensagem rejeitada pelo WhatsApp.`);
-                    finish({ ok: false, msg: `ACK negativo: mensagem rejeitada pelo WhatsApp para "${destinoNome}".` });
+                    addLog('Erro', `ACK negativo para "${destinoNome}". Mensagem rejeitada pelo WhatsApp.`);
+                    finish({ ok: false, msg: `ACK negativo: mensagem rejeitada para "${destinoNome}".` });
                 } else if (ack >= 1) {
-                    addLog('Sucesso', `Mensagem confirmada para "${destinoNome}". GrupoID=${destinoId}. ID=${mid}`);
+                    addLog('Sucesso', `Confirmado para "${destinoNome}". ID=${mid}`);
                     finish({ ok: true, id: mid, grupo: destinoNome, grupoId: destinoId });
                 }
             }
 
-            if (clientInstance) clientInstance.on('message_ack', onAck);
+            try { if (clientInstance) clientInstance.on('message_ack', onAck); } catch (_) {}
 
-            // Timeout de segurança: se ACK não chegar em 15s, considera enviado
             ackTimeout = setTimeout(() => {
-                addLog('Aviso', `ACK não chegou em 15s para "${destinoNome}". Considerando como enviado.`);
+                addLog('Aviso', `ACK não chegou em 15s para "${destinoNome}". Considerando enviado.`);
                 finish({ ok: true, grupo: destinoNome, grupoId: destinoId });
             }, 15000);
 
             try {
+                if (!getClient()) { finish({ ok: false, msg: 'Bot desconectou durante envio.' }); return; }
                 const sentMsg = await clientInstance.sendMessage(destinoId, mensagemFinal);
                 sentMsgId = sentMsg?.id?._serialized || sentMsg?.id?.id || null;
-
                 if (!sentMsgId) {
-                    addLog('Sucesso', `Mensagem enviada para "${destinoNome}" (sem ID para rastrear ACK).`);
+                    addLog('Sucesso', `Enviado para "${destinoNome}" (sem ID para rastrear ACK).`);
                     finish({ ok: true, grupo: destinoNome, grupoId: destinoId });
                 }
             } catch (sendErr) {
-                addLog('Erro', `Falha no sendMessage para "${destinoNome}"`, getErrorDetails(sendErr));
+                addLog('Erro', `sendMessage falhou: "${destinoNome}"`, getErrorDetails(sendErr));
                 finish({ ok: false, msg: getErrorDetails(sendErr) });
             }
         });
@@ -465,6 +464,8 @@ async function enviarLembrete(grupo, mensagem, meta = {}) {
         return { ok: false, msg: getErrorDetails(e) };
     }
 }
+
+// ── ZIP / SESSÃO ───────────────────────────────────────────────────────────
 
 function zipDirectory(sourceDir, outPath) {
     return new Promise((resolve, reject) => {
@@ -493,12 +494,14 @@ function requireSupabase() {
     if (!supabase) throw new Error('Supabase não configurado. Defina SUPABASE_URL e SUPABASE_SERVICE_ROLE_KEY no Render.');
 }
 
+// ── SUPABASE ───────────────────────────────────────────────────────────────
+
 async function saveConfigToSupabase() {
     requireSupabase();
     ensureDir(path.dirname(CONFIG_FILE));
     const normalized = normalizeConfig(config);
     fs.writeFileSync(CONFIG_FILE, JSON.stringify(normalized, null, 2));
-    addLog('Config', `Enviando config para Supabase: ${SUPABASE_BUCKET}/${SUPABASE_CONFIG_PATH}`);
+    addLog('Config', `Enviando config para Supabase.`);
     const fileBuffer = fs.readFileSync(CONFIG_FILE);
     const { error } = await supabase.storage.from(SUPABASE_BUCKET).upload(SUPABASE_CONFIG_PATH, fileBuffer, { contentType: 'application/json', upsert: true });
     if (error) throw error;
@@ -508,11 +511,10 @@ async function saveConfigToSupabase() {
 async function restoreConfigFromSupabase() {
     if (!supabase) { addLog('Config', 'Supabase não configurado. Usando config local.'); return false; }
     try {
-        addLog('Config', `Restaurando agendamentos do Supabase: ${SUPABASE_BUCKET}/${SUPABASE_CONFIG_PATH}`);
+        addLog('Config', `Restaurando config do Supabase.`);
         const { data, error } = await supabase.storage.from(SUPABASE_BUCKET).download(SUPABASE_CONFIG_PATH);
-        if (error) { addLog('Config', `Sem arquivo remoto em "${SUPABASE_CONFIG_PATH}". Usando config local.`, getErrorDetails(error)); return false; }
-        const text = await data.text();
-        const remoteConfig = normalizeConfig(JSON.parse(text));
+        if (error) { addLog('Config', `Sem config remota. Usando local.`); return false; }
+        const remoteConfig = normalizeConfig(JSON.parse(await data.text()));
         ensureDir(path.dirname(CONFIG_FILE));
         fs.writeFileSync(CONFIG_FILE, JSON.stringify(remoteConfig, null, 2));
         config = remoteConfig;
@@ -520,10 +522,7 @@ async function restoreConfigFromSupabase() {
         const ativos = config.agendamentos.filter(a => a.ativo).length;
         addLog('Config', `Agendamentos restaurados. Total=${total}, ativos=${ativos}.`);
         return true;
-    } catch (e) {
-        addLog('Erro', 'Erro ao restaurar agendamentos do Supabase', getErrorDetails(e));
-        return false;
-    }
+    } catch (e) { addLog('Erro', 'Erro ao restaurar config do Supabase', getErrorDetails(e)); return false; }
 }
 
 function normalizePredefinidas(data) {
@@ -539,12 +538,9 @@ function normalizePredefinidas(data) {
 
 function loadPredefinidasLocal() {
     try {
-        if (fs.existsSync(PREDEFINIDAS_FILE)) {
+        if (fs.existsSync(PREDEFINIDAS_FILE))
             return normalizePredefinidas(JSON.parse(fs.readFileSync(PREDEFINIDAS_FILE, 'utf8')));
-        }
-    } catch (e) {
-        addLog('Erro', 'Erro ao carregar predefinidas locais', getErrorDetails(e));
-    }
+    } catch (e) { addLog('Erro', 'Erro ao carregar predefinidas locais', getErrorDetails(e)); }
     return [];
 }
 
@@ -558,7 +554,7 @@ async function savePredefinidasToSupabase(predefinidas) {
     const normalized = normalizePredefinidas(predefinidas);
     savePredefinidasLocal(normalized);
     const fileBuffer = Buffer.from(JSON.stringify(normalized, null, 2));
-    addLog('Predefinidas', `Enviando predefinidas para Supabase: ${SUPABASE_BUCKET}/${SUPABASE_PREDEFINIDAS_PATH}`);
+    addLog('Predefinidas', `Salvando predefinidas no Supabase.`);
     const { error } = await supabase.storage.from(SUPABASE_BUCKET).upload(SUPABASE_PREDEFINIDAS_PATH, fileBuffer, { contentType: 'application/json', upsert: true });
     if (error) throw error;
     addLog('Predefinidas', 'Predefinidas salvas no Supabase.');
@@ -570,8 +566,7 @@ async function restorePredefinidasFromSupabase() {
     try {
         const { data, error } = await supabase.storage.from(SUPABASE_BUCKET).download(SUPABASE_PREDEFINIDAS_PATH);
         if (error) return loadPredefinidasLocal();
-        const text = await data.text();
-        const predefinidas = normalizePredefinidas(JSON.parse(text));
+        const predefinidas = normalizePredefinidas(JSON.parse(await data.text()));
         savePredefinidasLocal(predefinidas);
         return predefinidas;
     } catch (e) {
@@ -588,16 +583,15 @@ async function saveSessionToSupabase() {
     addLog('Sessão', `Compactando sessão: ${AUTH_DIR}`);
     const zipBytes = await zipDirectory(AUTH_DIR, tmpFile);
     addLog('Sessão', `ZIP: ${(zipBytes / 1024 / 1024).toFixed(2)} MB`);
-    const fileStream = fs.createReadStream(tmpFile);
-    addLog('Sessão', `Enviando para Supabase: ${SUPABASE_BUCKET}/${SUPABASE_SESSION_PATH}`);
-    const { error } = await supabase.storage.from(SUPABASE_BUCKET).upload(SUPABASE_SESSION_PATH, fileStream, { contentType: 'application/zip', upsert: true });
+    const { error } = await supabase.storage.from(SUPABASE_BUCKET)
+        .upload(SUPABASE_SESSION_PATH, fs.createReadStream(tmpFile), { contentType: 'application/zip', upsert: true });
     await fs.promises.rm(tmpFile, { force: true });
     if (error) throw error;
 }
 
 async function deleteSessionFromSupabase() {
     requireSupabase();
-    addLog('Sessão', `Excluindo do Supabase: ${SUPABASE_BUCKET}/${SUPABASE_SESSION_PATH}`);
+    addLog('Sessão', `Excluindo sessão do Supabase.`);
     const { error } = await supabase.storage.from(SUPABASE_BUCKET).remove([SUPABASE_SESSION_PATH]);
     if (error) throw error;
 }
@@ -607,11 +601,10 @@ async function restoreSessionFromSupabase() {
     restarting = true;
     setBotState('restoring', 'Restaurando sessão...');
     const tmpFile = path.join('/tmp', `wwebjs_restore_${Date.now()}.zip`);
-    addLog('Sessão', `Baixando do Supabase: ${SUPABASE_BUCKET}/${SUPABASE_SESSION_PATH}`);
+    addLog('Sessão', `Baixando sessão do Supabase.`);
     const { data, error } = await supabase.storage.from(SUPABASE_BUCKET).download(SUPABASE_SESSION_PATH);
     if (error) throw error;
-    const buffer = Buffer.from(await data.arrayBuffer());
-    await fs.promises.writeFile(tmpFile, buffer);
+    await fs.promises.writeFile(tmpFile, Buffer.from(await data.arrayBuffer()));
     await stopBot(true);
     addLog('Sessão', `Extraindo sessão em: ${AUTH_DIR}`);
     await extractZip(tmpFile, AUTH_DIR);
@@ -622,96 +615,74 @@ async function restoreSessionFromSupabase() {
     await iniciarBot();
 }
 
+// ── FIX #5: stopBot aguarda destruição completa antes de liberar ───────────
 async function stopBot(keepRestarting = false) {
     restarting = true;
     setBotState('restarting', 'Reiniciando...');
     Object.values(scheduledJobs).forEach(j => j.stop());
     scheduledJobs = {};
-    if (clientInstance) {
-        try { await clientInstance.destroy(); } catch (e) { addLog('Aviso', 'Erro ao destruir client', getErrorDetails(e)); }
-    }
-    clientInstance = null;
+    invalidateGruposCache();
+
+    const localClient = clientInstance;
+    clientInstance = null;   // nullifica ANTES de destroy para guards funcionarem
     botConnected = false;
     qrCodeDataURL = null;
+
+    if (localClient) {
+        try {
+            await Promise.race([
+                localClient.destroy(),
+                wait(8000)   // timeout de segurança — não trava indefinidamente
+            ]);
+        } catch (e) { addLog('Aviso', 'Erro ao destruir client', getErrorDetails(e)); }
+    }
+
     if (!keepRestarting) restarting = false;
 }
 
-
-// ── MCP SERVER HTTP ────────────────────────────────────────────────────────
-// Endpoint remoto simples compatível com chamadas JSON-RPC do MCP.
-// Protegido por Authorization: Bearer <MCP_AUTH_TOKEN>.
+// ── MCP ────────────────────────────────────────────────────────────────────
 
 function mcpAuthMiddleware(req, res, next) {
     if (!MCP_AUTH_TOKEN) {
-        return res.status(503).json({
-            ok: false,
-            error: 'MCP_AUTH_TOKEN não configurado. Defina esta variável no Render antes de expor o MCP.'
-        });
+        return res.status(503).json({ ok: false, error: 'MCP_AUTH_TOKEN não configurado.' });
     }
-
     const auth = req.headers.authorization || '';
     const token = auth.startsWith('Bearer ') ? auth.slice(7).trim() : '';
-
-    if (token !== MCP_AUTH_TOKEN) {
-        return res.status(401).json({ ok: false, error: 'Token MCP inválido ou ausente.' });
-    }
-
+    if (token !== MCP_AUTH_TOKEN) return res.status(401).json({ ok: false, error: 'Token MCP inválido.' });
     next();
 }
 
 function jsonTextResult(data, isError = false) {
-    return {
-        content: [
-            {
-                type: 'text',
-                text: typeof data === 'string' ? data : JSON.stringify(data, null, 2)
-            }
-        ],
-        isError
-    };
+    return { content: [{ type: 'text', text: typeof data === 'string' ? data : JSON.stringify(data, null, 2) }], isError };
 }
 
-function mcpTool(name, description, inputSchema) {
-    return { name, description, inputSchema };
-}
+function mcpTool(name, description, inputSchema) { return { name, description, inputSchema }; }
 
 function getMcpTools() {
     return [
-        mcpTool('listar_status_bot', 'Lista o status atual do bot, conexão, uptime e caminhos configurados.', {
-            type: 'object', properties: {}, additionalProperties: false
-        }),
-        mcpTool('listar_grupos', 'Lista grupos disponíveis no WhatsApp com nome e ID real.', {
-            type: 'object', properties: {}, additionalProperties: false
-        }),
-        mcpTool('listar_agendamentos', 'Lista todos os agendamentos configurados.', {
-            type: 'object', properties: {}, additionalProperties: false
-        }),
+        mcpTool('listar_status_bot', 'Lista o status atual do bot, conexão, uptime e caminhos configurados.', { type: 'object', properties: {}, additionalProperties: false }),
+        mcpTool('listar_grupos', 'Lista grupos disponíveis no WhatsApp com nome e ID real.', { type: 'object', properties: {}, additionalProperties: false }),
+        mcpTool('listar_agendamentos', 'Lista todos os agendamentos configurados.', { type: 'object', properties: {}, additionalProperties: false }),
         mcpTool('criar_agendamento', 'Cria um novo agendamento. Preferencialmente use grupoId obtido em listar_grupos.', {
             type: 'object',
             properties: {
                 grupo: { type: 'string', description: 'Nome do grupo' },
-                grupoId: { type: 'string', description: 'ID real do grupo, exemplo 12036...@g.us' },
+                grupoId: { type: 'string', description: 'ID real do grupo' },
                 mensagem: { type: 'string' },
                 horario: { type: 'string', description: 'Horário de Brasília no formato HH:MM' },
-                diasSemana: { type: 'array', items: { type: 'number' }, description: '0=Domingo, 1=Segunda... 6=Sábado' },
+                diasSemana: { type: 'array', items: { type: 'number' }, description: '0=Dom, 1=Seg... 6=Sáb' },
                 ativo: { type: 'boolean' }
             },
-            required: ['mensagem', 'horario'],
-            additionalProperties: false
+            required: ['mensagem', 'horario'], additionalProperties: false
         }),
         mcpTool('editar_agendamento', 'Edita um agendamento existente pelo ID.', {
             type: 'object',
             properties: {
-                id: { type: ['string', 'number'] },
-                grupo: { type: 'string' },
-                grupoId: { type: 'string' },
-                mensagem: { type: 'string' },
-                horario: { type: 'string' },
-                diasSemana: { type: 'array', items: { type: 'number' } },
-                ativo: { type: 'boolean' }
+                id: { type: ['string', 'number'] }, grupo: { type: 'string' }, grupoId: { type: 'string' },
+                mensagem: { type: 'string' }, horario: { type: 'string' },
+                diasSemana: { type: 'array', items: { type: 'number' } }, ativo: { type: 'boolean' }
             },
-            required: ['id'],
-            additionalProperties: false
+            required: ['id'], additionalProperties: false
         }),
         mcpTool('excluir_agendamento', 'Exclui um agendamento pelo ID.', {
             type: 'object', properties: { id: { type: ['string', 'number'] } }, required: ['id'], additionalProperties: false
@@ -722,20 +693,16 @@ function getMcpTools() {
         mcpTool('pausar_agendamento', 'Pausa um agendamento pelo ID.', {
             type: 'object', properties: { id: { type: ['string', 'number'] } }, required: ['id'], additionalProperties: false
         }),
-        mcpTool('listar_predefinidas', 'Lista mensagens predefinidas salvas.', {
-            type: 'object', properties: {}, additionalProperties: false
-        }),
+        mcpTool('listar_predefinidas', 'Lista mensagens predefinidas salvas.', { type: 'object', properties: {}, additionalProperties: false }),
         mcpTool('criar_predefinida', 'Cria uma mensagem predefinida.', {
             type: 'object',
             properties: { titulo: { type: 'string' }, mensagem: { type: 'string' } },
-            required: ['mensagem'],
-            additionalProperties: false
+            required: ['mensagem'], additionalProperties: false
         }),
         mcpTool('editar_predefinida', 'Edita uma mensagem predefinida pelo ID.', {
             type: 'object',
             properties: { id: { type: ['string', 'number'] }, titulo: { type: 'string' }, mensagem: { type: 'string' } },
-            required: ['id'],
-            additionalProperties: false
+            required: ['id'], additionalProperties: false
         }),
         mcpTool('excluir_predefinida', 'Exclui uma mensagem predefinida pelo ID.', {
             type: 'object', properties: { id: { type: ['string', 'number'] } }, required: ['id'], additionalProperties: false
@@ -743,85 +710,38 @@ function getMcpTools() {
         mcpTool('enviar_mensagem_teste', 'Envia uma mensagem manual para um grupo.', {
             type: 'object',
             properties: { grupo: { type: 'string' }, grupoId: { type: 'string' }, mensagem: { type: 'string' } },
-            required: ['mensagem'],
-            additionalProperties: false
+            required: ['mensagem'], additionalProperties: false
         }),
         mcpTool('listar_logs', 'Lista os logs recentes do bot.', {
             type: 'object',
             properties: { limite: { type: 'number', description: 'Quantidade máxima de logs, padrão 50' } },
             additionalProperties: false
         }),
-        mcpTool('salvar_sessao', 'Salva a sessão atual do WhatsApp no Supabase.', {
-            type: 'object', properties: {}, additionalProperties: false
-        }),
-        mcpTool('restaurar_sessao', 'Inicia a restauração da sessão do WhatsApp a partir do Supabase.', {
-            type: 'object', properties: {}, additionalProperties: false
-        }),
-        mcpTool('excluir_sessao', 'Exclui o backup da sessão do WhatsApp no Supabase.', {
-            type: 'object', properties: {}, additionalProperties: false
-        }),
-        mcpTool('atualizar_sessao_e_grupos', 'Reinicia o client do WhatsApp sem apagar a sessão, forçando nova leitura dos grupos.', {
-            type: 'object', properties: {}, additionalProperties: false
-        })
+        mcpTool('salvar_sessao', 'Salva a sessão atual do WhatsApp no Supabase.', { type: 'object', properties: {}, additionalProperties: false }),
+        mcpTool('restaurar_sessao', 'Inicia a restauração da sessão do WhatsApp a partir do Supabase.', { type: 'object', properties: {}, additionalProperties: false }),
+        mcpTool('excluir_sessao', 'Exclui o backup da sessão do WhatsApp no Supabase.', { type: 'object', properties: {}, additionalProperties: false }),
+        mcpTool('atualizar_sessao_e_grupos', 'Reinicia o client do WhatsApp sem apagar a sessão, forçando nova leitura dos grupos.', { type: 'object', properties: {}, additionalProperties: false })
     ];
 }
 
 function mcpStatus() {
     return {
-        connected: botConnected,
-        state: botState,
-        status: botStatus,
-        restarting,
-        timezone: BRASILIA_TZ,
-        uptimeSeconds: Math.floor(process.uptime()),
-        startedAt: STARTED_AT.toISOString(),
-        supabaseConfigured: Boolean(supabase),
+        connected: botConnected, state: botState, status: botStatus, restarting,
+        timezone: BRASILIA_TZ, uptimeSeconds: Math.floor(process.uptime()),
+        startedAt: STARTED_AT.toISOString(), supabaseConfigured: Boolean(supabase),
         agendamentos: Array.isArray(config.agendamentos) ? config.agendamentos.length : 0,
-        agendamentosAtivos: Array.isArray(config.agendamentos) ? config.agendamentos.filter(a => a.ativo).length : 0
+        agendamentosAtivos: Array.isArray(config.agendamentos) ? config.agendamentos.filter(a => a.ativo).length : 0,
+        gruposCacheValido: Boolean(gruposCache.list),
+        gruposCacheTotal: gruposCache.list?.length || 0
     };
 }
 
 async function persistConfigFromMcp(logMessage = 'Config atualizada via MCP.') {
     config = normalizeConfig(config);
     saveConfig(config);
-    try {
-        await saveConfigToSupabase();
-    } catch (e) {
-        addLog('Erro', 'Config salva localmente via MCP, falhou no Supabase', getErrorDetails(e));
-    }
+    try { await saveConfigToSupabase(); } catch (e) { addLog('Erro', 'Config salva localmente via MCP, falhou no Supabase', getErrorDetails(e)); }
     if (botConnected) scheduleAll();
     addLog('MCP', logMessage);
-}
-
-function resolveGroupNameById(grupoId, fallback = '') {
-    if (!grupoId || !clientInstance || !botConnected) return fallback;
-    return fallback;
-}
-
-async function listGroupsForMcp() {
-    if (!clientInstance || !botConnected) return [];
-    const chats = await clientInstance.getChats();
-    const botIdRaw = clientInstance.info?.wid?._serialized || '';
-    const botNumber = String(botIdRaw).replace(/\D/g, '');
-    const grupos = [];
-
-    for (const chat of chats) {
-        if (!chat.isGroup) continue;
-        const groupId = chat.id?._serialized || '';
-        const nome = chat.name || '';
-        try {
-            const fullChat = await clientInstance.getChatById(groupId);
-            const participants = Array.isArray(fullChat.participants) ? fullChat.participants : [];
-            const botAindaParticipa = Boolean(botNumber) && participants.some(p => {
-                const pid = String(p?.id?._serialized || p?.id?.user || p?.id || '').replace(/\D/g, '');
-                return pid === botNumber;
-            });
-            if (!botAindaParticipa || fullChat.isReadOnly === true) continue;
-            grupos.push({ nome, id: groupId });
-        } catch (_) {}
-    }
-
-    return grupos.sort((a, b) => a.nome.localeCompare(b.nome));
 }
 
 async function callMcpTool(name, args = {}) {
@@ -830,7 +750,8 @@ async function callMcpTool(name, args = {}) {
             return mcpStatus();
 
         case 'listar_grupos':
-            return await listGroupsForMcp();
+            // Usa cache compartilhado — evita múltiplos getChats() simultâneos
+            return await listGroupsInternal();
 
         case 'listar_agendamentos':
             return normalizeConfig(config).agendamentos;
@@ -841,9 +762,7 @@ async function callMcpTool(name, args = {}) {
             if (!grupo && !grupoId) throw new Error('Informe grupo ou grupoId.');
             if (!args.mensagem) throw new Error('Mensagem obrigatória.');
             const ag = migrateAgendamento({
-                id: Date.now(),
-                grupo,
-                grupoId,
+                id: Date.now(), grupo, grupoId,
                 mensagem: String(args.mensagem || ''),
                 horario: String(args.horario || '08:00'),
                 diasSemana: Array.isArray(args.diasSemana) ? args.diasSemana : [1, 2, 3, 4, 5],
@@ -861,8 +780,7 @@ async function callMcpTool(name, args = {}) {
             config = normalizeConfig(config);
             const idx = config.agendamentos.findIndex(a => String(a.id) === String(id));
             if (idx < 0) throw new Error(`Agendamento ${id} não encontrado.`);
-            const atual = config.agendamentos[idx];
-            config.agendamentos[idx] = migrateAgendamento({ ...atual, ...args, id: atual.id });
+            config.agendamentos[idx] = migrateAgendamento({ ...config.agendamentos[idx], ...args, id: config.agendamentos[idx].id });
             await persistConfigFromMcp(`Agendamento editado via MCP: ${id}`);
             return { ok: true, agendamento: config.agendamentos[idx], config };
         }
@@ -947,14 +865,8 @@ async function callMcpTool(name, args = {}) {
             setBotState('restoring', 'Restaurando sessão do Supabase via MCP...');
             addLog('MCP', 'Restauração de sessão iniciada via MCP.');
             setTimeout(async () => {
-                try {
-                    await restoreSessionFromSupabase();
-                    addLog('MCP', 'Sessão restaurada via MCP.');
-                } catch (e) {
-                    addLog('Erro', 'Erro ao restaurar sessão via MCP', getErrorDetails(e));
-                    setBotState('error', 'Erro ao restaurar sessão via MCP');
-                    restarting = false;
-                }
+                try { await restoreSessionFromSupabase(); addLog('MCP', 'Sessão restaurada via MCP.'); }
+                catch (e) { addLog('Erro', 'Erro ao restaurar sessão via MCP', getErrorDetails(e)); setBotState('error', 'Erro ao restaurar via MCP'); restarting = false; }
             }, 300);
             return { ok: true, msg: 'Restauração iniciada. Consulte listar_status_bot/listar_logs.' };
 
@@ -966,16 +878,8 @@ async function callMcpTool(name, args = {}) {
         case 'atualizar_sessao_e_grupos':
             addLog('MCP', 'Reinício local solicitado via MCP.');
             setTimeout(async () => {
-                try {
-                    await stopBot(true);
-                    await wait(1500);
-                    await iniciarBot();
-                    addLog('MCP', 'Sessão local reiniciada via MCP.');
-                } catch (e) {
-                    addLog('Erro', 'Erro ao reiniciar sessão via MCP', getErrorDetails(e));
-                    setBotState('error', 'Erro ao reiniciar via MCP');
-                    restarting = false;
-                }
+                try { await stopBot(true); await wait(1500); await iniciarBot(); addLog('MCP', 'Sessão local reiniciada via MCP.'); }
+                catch (e) { addLog('Erro', 'Erro ao reiniciar via MCP', getErrorDetails(e)); setBotState('error', 'Erro ao reiniciar via MCP'); restarting = false; }
             }, 300);
             return { ok: true, msg: 'Reinício iniciado. Consulte listar_status_bot/listar_logs.' };
 
@@ -988,39 +892,19 @@ async function handleMcpRequest(payload) {
     if (!payload || typeof payload !== 'object') {
         return { jsonrpc: '2.0', id: null, error: { code: -32600, message: 'Requisição inválida.' } };
     }
-
     const id = payload.id ?? null;
     const method = payload.method;
     const params = payload.params || {};
-
     try {
         if (method === 'initialize') {
-            return {
-                jsonrpc: '2.0',
-                id,
-                result: {
-                    protocolVersion: params.protocolVersion || '2024-11-05',
-                    capabilities: { tools: {} },
-                    serverInfo: { name: 'bot-whatsapp-mcp', version: '1.0.0' }
-                }
-            };
+            return { jsonrpc: '2.0', id, result: { protocolVersion: params.protocolVersion || '2024-11-05', capabilities: { tools: {} }, serverInfo: { name: 'bot-whatsapp-mcp', version: '1.0.0' } } };
         }
-
-        if (method === 'notifications/initialized') {
-            return null;
-        }
-
-        if (method === 'tools/list') {
-            return { jsonrpc: '2.0', id, result: { tools: getMcpTools() } };
-        }
-
+        if (method === 'notifications/initialized') return null;
+        if (method === 'tools/list') return { jsonrpc: '2.0', id, result: { tools: getMcpTools() } };
         if (method === 'tools/call') {
-            const toolName = params.name;
-            const args = params.arguments || {};
-            const data = await callMcpTool(toolName, args);
+            const data = await callMcpTool(params.name, params.arguments || {});
             return { jsonrpc: '2.0', id, result: jsonTextResult(data, false) };
         }
-
         return { jsonrpc: '2.0', id, error: { code: -32601, message: `Método não suportado: ${method}` } };
     } catch (e) {
         return { jsonrpc: '2.0', id, result: jsonTextResult({ ok: false, error: getErrorDetails(e) }, true) };
@@ -1037,17 +921,9 @@ app.get('/api/health', (req, res) => {
 app.get('/health', (req, res) => res.redirect('/api/health'));
 app.get('/ping', (req, res) => { res.set('Cache-Control', 'no-store'); res.status(200).send('pong'); });
 
-
 app.get(MCP_ENDPOINT, mcpAuthMiddleware, (req, res) => {
     res.set('Cache-Control', 'no-store');
-    res.json({
-        ok: true,
-        name: 'bot-whatsapp-mcp',
-        endpoint: MCP_ENDPOINT,
-        transport: 'http-jsonrpc',
-        auth: 'Bearer token',
-        tools: getMcpTools().map(t => t.name)
-    });
+    res.json({ ok: true, name: 'bot-whatsapp-mcp', endpoint: MCP_ENDPOINT, transport: 'http-jsonrpc', auth: 'Bearer token', tools: getMcpTools().map(t => t.name) });
 });
 
 app.post(MCP_ENDPOINT, mcpAuthMiddleware, async (req, res) => {
@@ -1067,7 +943,7 @@ app.post(MCP_ENDPOINT, mcpAuthMiddleware, async (req, res) => {
 });
 
 app.get('/api/status', (req, res) => {
-    res.json({ connected: botConnected, state: botState, status: botStatus, restarting, qr: qrCodeDataURL, timezone: 'Horário de Brasília', supabaseConfigured: Boolean(supabase), uptimeSeconds: Math.floor(process.uptime()), startedAt: STARTED_AT.toISOString(), supabaseBucket: SUPABASE_BUCKET, supabaseSessionPath: SUPABASE_SESSION_PATH, supabaseConfigPath: SUPABASE_CONFIG_PATH, supabasePredefinidasPath: SUPABASE_PREDEFINIDAS_PATH, mcpConfigured: Boolean(MCP_AUTH_TOKEN), mcpEndpoint: MCP_ENDPOINT });
+    res.json({ connected: botConnected, state: botState, status: botStatus, restarting, qr: qrCodeDataURL, timezone: 'Horário de Brasília', supabaseConfigured: Boolean(supabase), uptimeSeconds: Math.floor(process.uptime()), startedAt: STARTED_AT.toISOString(), supabaseBucket: SUPABASE_BUCKET, supabaseSessionPath: SUPABASE_SESSION_PATH, supabaseConfigPath: SUPABASE_CONFIG_PATH, supabasePredefinidasPath: SUPABASE_PREDEFINIDAS_PATH, mcpConfigured: Boolean(MCP_AUTH_TOKEN), mcpEndpoint: MCP_ENDPOINT, gruposCacheValido: Boolean(gruposCache.list), gruposCacheTotal: gruposCache.list?.length || 0 });
 });
 
 app.get('/api/config', (req, res) => res.json(config));
@@ -1086,7 +962,6 @@ app.post('/api/config', async (req, res) => {
     }
 });
 
-
 app.post('/api/agendamento', async (req, res) => {
     try {
         const ag = migrateAgendamento(req.body || {});
@@ -1099,7 +974,7 @@ app.post('/api/agendamento', async (req, res) => {
         saveConfig(config);
         try { await saveConfigToSupabase(); } catch (e) { addLog('Erro', 'Agendamento salvo localmente, falhou no Supabase', getErrorDetails(e)); }
         if (botConnected) scheduleAll();
-        addLog('Config', `Agendamento salvo individualmente: "${ag.grupo || 'sem grupo'}"`);
+        addLog('Config', `Agendamento salvo: "${ag.grupo || 'sem grupo'}"`);
         res.json({ ok: true, agendamento: ag, config });
     } catch (e) {
         addLog('Erro', 'Erro ao salvar agendamento individual', getErrorDetails(e));
@@ -1118,8 +993,7 @@ app.post('/api/predefinidas', async (req, res) => {
         if (!incoming) return res.status(400).json({ ok: false, msg: 'Título ou mensagem obrigatórios.' });
         const current = await restorePredefinidasFromSupabase();
         const idx = current.findIndex(item => String(item.id) === String(incoming.id));
-        if (idx >= 0) current[idx] = incoming;
-        else current.unshift(incoming);
+        if (idx >= 0) current[idx] = incoming; else current.unshift(incoming);
         const saved = await savePredefinidasToSupabase(current);
         res.json({ ok: true, predefinida: incoming, predefinidas: saved });
     } catch (e) {
@@ -1157,46 +1031,14 @@ app.post('/api/enviar', async (req, res) => {
     res.json(result);
 });
 
+// FIX #6: /api/grupos usa o cache compartilhado — não mais getChats() direto
 app.get('/api/grupos', async (req, res) => {
     res.set('Cache-Control', 'no-store, no-cache, must-revalidate');
     res.set('Pragma', 'no-cache');
     res.set('Expires', '0');
     if (!clientInstance || !botConnected) return res.json([]);
-
     try {
-        const chats = await clientInstance.getChats();
-        const botIdRaw = clientInstance.info?.wid?._serialized || '';
-        const botNumber = String(botIdRaw).replace(/\D/g, '');
-        const grupos = [];
-
-        for (const chat of chats) {
-            if (!chat.isGroup) continue;
-            const groupId = chat.id?._serialized || '';
-            const nome = chat.name || '';
-            try {
-                const fullChat = await clientInstance.getChatById(groupId);
-                const participants = Array.isArray(fullChat.participants) ? fullChat.participants : [];
-
-                const botAindaParticipa = Boolean(botNumber) && participants.some(p => {
-                    const pid = String(p?.id?._serialized || p?.id?.user || p?.id || '').replace(/\D/g, '');
-                    return pid === botNumber;
-                });
-
-                if (!botAindaParticipa) {
-                    addLog('Grupos', `Ignorado (bot não participa): "${nome}" id="${groupId}"`);
-                    continue;
-                }
-                if (fullChat.isReadOnly === true) {
-                    addLog('Grupos', `Ignorado (somente leitura): "${nome}" id="${groupId}"`);
-                    continue;
-                }
-                grupos.push({ nome, id: groupId });
-            } catch (e) {
-                addLog('Aviso', `Falha ao validar grupo "${nome}" id="${groupId}"`, getErrorDetails(e));
-            }
-        }
-
-        grupos.sort((a, b) => a.nome.localeCompare(b.nome));
+        const grupos = await listGroupsInternal();
         res.json(grupos);
     } catch (e) {
         addLog('Erro', 'Erro ao listar grupos', getErrorDetails(e));
@@ -1207,12 +1049,9 @@ app.get('/api/grupos', async (req, res) => {
 app.post('/api/session/save', async (req, res) => {
     try {
         await saveSessionToSupabase();
-        addLog('Sessão', `Sessão salva no Supabase.`);
+        addLog('Sessão', 'Sessão salva no Supabase.');
         res.json({ ok: true, msg: 'Sessão salva no Supabase.' });
-    } catch (e) {
-        addLog('Erro', 'Erro ao salvar sessão', getErrorDetails(e));
-        res.status(500).json({ ok: false, msg: getErrorDetails(e) });
-    }
+    } catch (e) { addLog('Erro', 'Erro ao salvar sessão', getErrorDetails(e)); res.status(500).json({ ok: false, msg: getErrorDetails(e) }); }
 });
 
 app.post('/api/session/delete', async (req, res) => {
@@ -1220,10 +1059,7 @@ app.post('/api/session/delete', async (req, res) => {
         await deleteSessionFromSupabase();
         addLog('Sessão', 'Sessão excluída do Supabase.');
         res.json({ ok: true, msg: 'Sessão excluída do Supabase.' });
-    } catch (e) {
-        addLog('Erro', 'Erro ao excluir sessão', getErrorDetails(e));
-        res.status(500).json({ ok: false, msg: getErrorDetails(e) });
-    }
+    } catch (e) { addLog('Erro', 'Erro ao excluir sessão', getErrorDetails(e)); res.status(500).json({ ok: false, msg: getErrorDetails(e) }); }
 });
 
 app.post('/api/session/restart', async (req, res) => {
@@ -1231,21 +1067,10 @@ app.post('/api/session/restart', async (req, res) => {
         res.json({ ok: true, msg: 'Reiniciando WhatsApp sem apagar sessão...' });
         addLog('Sessão', 'Reiniciando WhatsApp sem apagar autenticação.');
         setTimeout(async () => {
-            try {
-                await stopBot(true);
-                await wait(1500);
-                await iniciarBot();
-                addLog('Sessão', 'Sessão local reiniciada. Aguardando conexão.');
-            } catch (e) {
-                addLog('Erro', 'Erro ao reiniciar sessão', getErrorDetails(e));
-                setBotState('error', 'Erro ao reiniciar');
-                restarting = false;
-            }
+            try { await stopBot(true); await wait(1500); await iniciarBot(); addLog('Sessão', 'Sessão local reiniciada. Aguardando conexão.'); }
+            catch (e) { addLog('Erro', 'Erro ao reiniciar sessão', getErrorDetails(e)); setBotState('error', 'Erro ao reiniciar'); restarting = false; }
         }, 300);
-    } catch (e) {
-        addLog('Erro', 'Erro ao solicitar reinício', getErrorDetails(e));
-        res.status(500).json({ ok: false, msg: getErrorDetails(e) });
-    }
+    } catch (e) { addLog('Erro', 'Erro ao solicitar reinício', getErrorDetails(e)); res.status(500).json({ ok: false, msg: getErrorDetails(e) }); }
 });
 
 app.post('/api/session/restore', async (req, res) => {
@@ -1255,19 +1080,10 @@ app.post('/api/session/restore', async (req, res) => {
         setBotState('restoring', 'Restaurando sessão do Supabase...');
         addLog('Sessão', 'Restaurando sessão do Supabase...');
         setTimeout(async () => {
-            try {
-                await restoreSessionFromSupabase();
-                addLog('Sessão', 'Sessão restaurada. Aguardando conexão do WhatsApp...');
-            } catch (e) {
-                addLog('Erro', 'Erro ao restaurar sessão', getErrorDetails(e));
-                setBotState('error', 'Erro ao restaurar sessão');
-                restarting = false;
-            }
+            try { await restoreSessionFromSupabase(); addLog('Sessão', 'Sessão restaurada. Aguardando conexão...'); }
+            catch (e) { addLog('Erro', 'Erro ao restaurar sessão', getErrorDetails(e)); setBotState('error', 'Erro ao restaurar sessão'); restarting = false; }
         }, 500);
-    } catch (e) {
-        addLog('Erro', 'Erro ao restaurar sessão', getErrorDetails(e));
-        res.status(500).json({ ok: false, msg: getErrorDetails(e) });
-    }
+    } catch (e) { addLog('Erro', 'Erro ao restaurar sessão', getErrorDetails(e)); res.status(500).json({ ok: false, msg: getErrorDetails(e) }); }
 });
 
 app.get('/', (req, res) => res.sendFile(path.join(__dirname, 'public', 'index.html')));
@@ -1297,17 +1113,14 @@ async function iniciarBot() {
         }
     });
 
-    clientInstance.on('loading_screen', (percent, message) => {
+    clientInstance.on('loading_screen', (percent) => {
         const p = Number(percent || 0);
         setBotState('connecting', `Carregando WhatsApp ${p}%...`);
-
-        // Evita dezenas de logs durante o carregamento do WhatsApp.
-        // Registra apenas marcos relevantes ou no máximo 1 vez por minuto.
         const bucket = p >= 99 ? 99 : p >= 95 ? 95 : Math.floor(p / 25) * 25;
         const now = Date.now();
         if (bucket !== lastLoadingLog.bucket || now - lastLoadingLog.at > 60000) {
             lastLoadingLog = { bucket, at: now };
-            addLog('WhatsApp', `Carregando ${p}%`, message || '');
+            addLog('WhatsApp', `Carregando ${p}%`);
         }
     });
 
@@ -1331,19 +1144,18 @@ async function iniciarBot() {
         setBotState('ready', 'Conectado');
         botConnected = true;
         restarting = false;
+        invalidateGruposCache(); // limpa cache antigo ao reconectar
         scheduleAll();
     });
 
-    // ACK global apenas para logs — o rastreamento por mensagem é feito em enviarLembrete
-    clientInstance.on('message_ack', (msg, ack) => {
-        // Silencioso aqui; o listener por mensagem individual cuida do log
-    });
+    clientInstance.on('message_ack', () => {});
 
     clientInstance.on('auth_failure', (msg) => {
         addLog('Erro', `Falha de autenticação: ${msg}`);
         setBotState('auth_failure', 'Erro de autenticação');
         botConnected = false;
         restarting = false;
+        invalidateGruposCache();
     });
 
     clientInstance.on('disconnected', (reason) => {
@@ -1353,16 +1165,17 @@ async function iniciarBot() {
         restarting = false;
         qrCodeDataURL = null;
         clientInstance = null;
+        invalidateGruposCache();
         if (!restarting) setTimeout(() => iniciarBot(), 5000);
     });
 
-    setBotState('connecting', 'Inicializando client do WhatsApp...');
     clientInstance.initialize().catch((e) => {
         addLog('Erro', 'Erro ao inicializar WhatsApp', getErrorDetails(e));
         setBotState('error', 'Erro ao inicializar WhatsApp');
         botConnected = false;
         restarting = false;
         clientInstance = null;
+        invalidateGruposCache();
         if (!restarting) setTimeout(() => iniciarBot(), 8000);
     });
 }
