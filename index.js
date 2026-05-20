@@ -422,57 +422,40 @@ async function iniciarBot() {
                 '--no-first-run',
                 '--no-zygote',
             ],
+            onStateChange: (state) => {
+                log('Estado', `WhatsApp: ${state}`);
+                if (state === 'CONNECTED' || state === 'isLogged') {
+                    qrDataURL = null;
+                    setState('ready', 'Conectado');
+                    botConnected = true;
+                    restarting = false;
+                    if (!initialSyncDone) {
+                        initialSyncDone = true;
+                        invalCache();
+                        scheduleAll();
+                        listGroups().catch(() => {});
+                    }
+                }
+                if (state === 'QRCode') {
+                    setState('qr', 'Aguardando escaneamento...');
+                    botConnected = false;
+                    restarting = false;
+                }
+                if (state === 'DISCONNECTED' || state === 'CONFLICT' || state === 'UNPAIRED' || state === 'UNPAIRED_IDLE') {
+                    botConnected = false;
+                    qrDataURL = null;
+                    if (state === 'CONFLICT') log('Erro', 'Outro dispositivo usando a conta. Aguardando...');
+                }
+            },
+            onQRCode: async (qr) => {
+                try {
+                    qrDataURL = await qrcode.toDataURL(qr);
+                    log('QR', 'Novo QR Code — escaneie no painel.');
+                } catch (e) { log('Erro', 'Falha QR', errMsg(e)); }
+            },
         });
 
         client = wpp;
-
-        wpp.onStateChange(async (state) => {
-            log('Estado', `WhatsApp: ${state}`);
-
-            if (state === 'QRCode') {
-                try {
-                    const qr = await wpp.getQrCode();
-                    if (qr && qr.base64) {
-                        qrDataURL = 'data:image/png;base64,' + qr.base64;
-                        log('QR', 'Novo QR Code — escaneie no painel.');
-                    }
-                } catch (e) { log('Erro', 'Falha ao gerar QR', errMsg(e)); }
-                setState('qr', 'Aguardando escaneamento...');
-                botConnected = false;
-                restarting = false;
-            }
-
-            if (state === 'CONNECTED' || state === 'isLogged') {
-                try {
-                    const me = await wpp.getHostDevice();
-                    log('Bot', `Conectado! ${me?.pushname || ''} (${me?.wid?._serialized || me?.wid || ''})`);
-                } catch (e) { log('Bot', 'Conectado com sucesso!'); }
-                qrDataURL = null;
-                setState('ready', 'Conectado');
-                botConnected = true;
-                restarting = false;
-                initialSyncDone = true;
-                invalCache();
-                scheduleAll();
-                listGroups().catch(() => {});
-            }
-
-            if (state === 'DISCONNECTED' || state === 'CONFLICT' || state === 'UNPAIRED' || state === 'UNPAIRED_IDLE') {
-                log('Bot', `Estado: ${state}. Reconexão automática...`);
-                botConnected = false;
-                qrDataURL = null;
-                if (state === 'CONFLICT') {
-                    log('Erro', 'Outro dispositivo usando a conta. Aguardando...');
-                }
-            }
-        });
-
-        wpp.onQRCode(async (qr) => {
-            try {
-                qrDataURL = await qrcode.toDataURL(qr);
-                log('QR', 'Novo QR Code — escaneie no painel.');
-            } catch (e) { log('Erro', 'Falha QR', errMsg(e)); }
-        });
 
         wpp.onAck(async (ack) => {
             const id = ack?.id || ack?._serialized || '';
