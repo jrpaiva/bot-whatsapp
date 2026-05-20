@@ -1,6 +1,6 @@
 {
   "name": "whatsapp-bot-lembretes-baileys-render",
-  "version": "4.0.2-baileys-render-512mb",
+  "version": "4.0.3-baileys-render-512mb",
   "description": "Bot de lembretes WhatsApp com Baileys, painel web e baixo consumo de RAM para Render 512 MB",
   "main": "index.js",
   "scripts": {
@@ -11,7 +11,7 @@
     "node": ">=20"
   },
   "dependencies": {
-    "baileys": "6.7.16",
+    "@whiskeysockets/baileys": "6.7.16",
     "pino": "^9.6.0",
     "node-cron": "^3.0.3",
     "qrcode": "^1.5.4",

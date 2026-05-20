@@ -70,17 +70,36 @@ let fetchLatestBaileysVersion = null;
 
 async function loadBaileys() {
     if (baileys) return baileys;
-    try {
-        baileys = await import('baileys');
-    } catch (e) {
-        try { baileys = await import('@whiskeysockets/baileys'); }
-        catch { throw e; }
+
+    const tryImport = async name => {
+        try { return await import(name); }
+        catch (e) { return null; }
+    };
+
+    // Preferimos o pacote oficial atual. Mantemos fallback para o alias antigo
+    // para evitar quebrar deploys com cache antigo.
+    baileys = await tryImport('@whiskeysockets/baileys') || await tryImport('baileys');
+    if (!baileys) throw new Error('Pacote Baileys não instalado');
+
+    const roots = [baileys, baileys.default, baileys.default?.default].filter(Boolean);
+    const firstFn = (...values) => values.find(v => typeof v === 'function');
+    const firstVal = (...values) => values.find(v => v !== undefined && v !== null);
+
+    makeWASocket = firstFn(
+        ...roots.map(m => m.makeWASocket),
+        ...roots.map(m => m.default),
+        baileys.makeWASocket,
+        baileys.default
+    );
+
+    useMultiFileAuthState = firstFn(...roots.map(m => m.useMultiFileAuthState));
+    fetchLatestBaileysVersion = firstFn(...roots.map(m => m.fetchLatestBaileysVersion));
+    DisconnectReason = firstVal(...roots.map(m => m.DisconnectReason), {});
+
+    if (!makeWASocket || !useMultiFileAuthState) {
+        const keys = roots.map(m => Object.keys(m || {}).slice(0, 30).join(',')).join(' | ');
+        throw new Error(`Baileys carregou, mas exports esperados não foram encontrados. Exports: ${keys}`);
     }
-    makeWASocket = baileys.default || baileys.makeWASocket;
-    useMultiFileAuthState = baileys.useMultiFileAuthState;
-    fetchLatestBaileysVersion = baileys.fetchLatestBaileysVersion;
-    DisconnectReason = baileys.DisconnectReason || {};
-    if (!makeWASocket || !useMultiFileAuthState) throw new Error('Baileys não carregou makeWASocket/useMultiFileAuthState');
     return baileys;
 }
 
@@ -635,7 +654,7 @@ const handleMcp = async payload => {
     if (!payload || typeof payload !== 'object') return { jsonrpc: '2.0', id: null, error: { code: -32600, message: 'Inválido' } };
     const id = payload.id ?? null;
     try {
-        if (payload.method === 'initialize') return { jsonrpc: '2.0', id, result: { protocolVersion: payload.params?.protocolVersion || '2024-11-05', capabilities: { tools: {} }, serverInfo: { name: 'bot-whatsapp-mcp-baileys', version: '4.0' } } };
+        if (payload.method === 'initialize') return { jsonrpc: '2.0', id, result: { protocolVersion: payload.params?.protocolVersion || '2024-11-05', capabilities: { tools: {} }, serverInfo: { name: 'bot-whatsapp-mcp-baileys', version: '4.0.3' } } };
         if (payload.method === 'notifications/initialized') return null;
         if (payload.method === 'tools/list') return { jsonrpc: '2.0', id, result: { tools: mcpTools() } };
         if (payload.method === 'tools/call') { const r = await callMcp(payload.params.name, payload.params.arguments); return { jsonrpc: '2.0', id, result: mcpR(r) }; }

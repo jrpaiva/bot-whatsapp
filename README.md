@@ -80,10 +80,10 @@ POST /api/enviar
 
 ## Correção v4.0.1
 
-- Fixado `baileys` em `6.7.16` porque `baileys@^7.0.0` não existe no npm e causa `ETARGET` no Render.
+- Fixado `@whiskeysockets/baileys` em `6.7.16` e importação robusta para CommonJS/ESM, evitando `makeWASocket is not a function`.
 
 
-## Correção v4.0.2
+## Correção v4.0.3
 
 - Adicionado `ws` e transporte explícito para Supabase no Node 20 do Render.
 - Corrige erro: `Node.js 20 detected without native WebSocket support`.
