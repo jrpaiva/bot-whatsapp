@@ -1,18 +1,22 @@
 {
-  "name": "whatsapp-bot-lembretes",
-  "version": "3.1.1-render-512mb-eacces-fix",
-  "description": "Bot de lembretes para multiplos grupos",
+  "name": "whatsapp-bot-lembretes-baileys-render",
+  "version": "4.0.0-baileys-render-512mb",
+  "description": "Bot de lembretes WhatsApp com Baileys, painel web e baixo consumo de RAM para Render 512 MB",
   "main": "index.js",
   "scripts": {
-    "start": "node index.js"
+    "start": "node index.js",
+    "check": "node --check index.js"
+  },
+  "engines": {
+    "node": ">=20"
   },
   "dependencies": {
-    "@wppconnect-team/wppconnect": "^1.41.3",
-    "@puppeteer/browsers": "^2.3.0",
+    "baileys": "^7.0.0",
+    "pino": "^9.6.0",
     "node-cron": "^3.0.3",
-    "qrcode": "^1.5.3",
-    "express": "^4.18.2",
-    "@supabase/supabase-js": "^2.45.4",
+    "qrcode": "^1.5.4",
+    "express": "^4.21.2",
+    "@supabase/supabase-js": "^2.48.1",
     "archiver": "^7.0.1",
     "unzipper": "^0.12.3"
   }

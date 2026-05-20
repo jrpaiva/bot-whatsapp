@@ -1,74 +1,66 @@
-# WA Bot — WPPConnect para Render 512 MB
+# WA Bot Baileys — Render 512 MB
 
-Versão ajustada para rodar no Render Free com 512 MB, usando WPPConnect e painel web.
+Versão migrada de WPPConnect/Puppeteer para Baileys.
 
-## O que foi corrigido
+## O que mudou
 
-- QR Code agora é capturado pelo callback correto `catchQR`.
-- Pareamento por código agora usa `phoneNumber` + `catchLinkCode`, que é o fluxo correto do WPPConnect.
-- Removido o reinício automático agressivo do QR a cada 30s, que causava conflito de navegador aberto.
-- Reduzido volume de logs em memória.
-- Desativado log de update do WPPConnect.
-- Adicionados argumentos mais leves para Chromium.
-- Adicionada limpeza de locks antigos do Chrome na pasta da sessão.
-- Corrigido retorno de informações de Supabase no `/api/status`.
+- Removeu completamente Chromium, Puppeteer, WPPConnect e cache de Chrome.
+- Usa Baileys via WebSocket do WhatsApp Web.
+- Mantém painel web, QR Code, pareamento por código, envio manual, grupos, agendamentos, mensagens predefinidas, logs e MCP.
+- Usa menos RAM no Render porque não abre navegador.
+- Sessão fica em `BAILEYS_AUTH_DIR` e pode ser salva/restaurada pelo Supabase Storage.
+- Backup automático da sessão no Supabase a cada `SESSION_AUTOSAVE_MS`, quando configurado.
 
-## Variáveis recomendadas no Render
-
-```env
-WPP_TOKEN_DIR=/tmp/wppconnect-tokens
-PUPPETEER_CACHE_DIR=/opt/render/.cache/puppeteer
-LOG_MAX_ENTRIES=180
-LOG_AUTO_CLEAR_HOURS=12
-MEMORY_WARN_MB=420
-MEMORY_RESTART_MB=500
-QR_REFRESH_MS=0
-PAIRING_WAIT_MS=90000
-SUPABASE_URL=https://SEU-PROJETO.supabase.co
-SUPABASE_SERVICE_ROLE_KEY=SUA_SERVICE_ROLE_KEY
-SUPABASE_BUCKET=whatsapp-sessions
-SUPABASE_SESSION_PATH=wppconnect-tokens.zip
-SUPABASE_CONFIG_PATH=bot_config.json
-MCP_AUTH_TOKEN=troque-por-uma-chave-grande-e-secreta
-```
-
-## Deploy
-
-```bash
-npm install
-npm start
-```
-
-No Render:
+## Render
 
 ```txt
 Build Command: npm install
-Start Command: node index.js
+Start Command: npm start
 ```
 
-## Conectar por QR Code
+Recomendo fazer deploy com:
 
-1. Abra o painel do Render.
-2. Aguarde aparecer o QR Code.
-3. No WhatsApp, vá em **Aparelhos conectados > Conectar um aparelho**.
+```txt
+Manual Deploy > Clear build cache & deploy
+```
+
+## Variáveis recomendadas
+
+```env
+NODE_VERSION=20
+BAILEYS_AUTH_DIR=/tmp/baileys-auth
+PAIRING_WAIT_MS=90000
+SESSION_AUTOSAVE_MS=60000
+LOG_MAX_ENTRIES=180
+LOG_AUTO_CLEAR_HOURS=12
+MEMORY_WARN_MB=360
+MEMORY_RESTART_MB=470
+SUPABASE_URL=https://SEU-PROJETO.supabase.co
+SUPABASE_SERVICE_ROLE_KEY=SUA_SERVICE_ROLE_KEY
+SUPABASE_BUCKET=whatsapp-sessions
+SUPABASE_SESSION_PATH=baileys-auth.zip
+SUPABASE_CONFIG_PATH=bot_config.json
+SUPABASE_PREDEFINIDAS_PATH=predefinidas.json
+MCP_AUTH_TOKEN=troque-por-uma-chave-grande-e-secreta
+```
+
+## Conectar por QR
+
+1. Abra o painel.
+2. Aguarde o QR aparecer.
+3. No WhatsApp: Aparelhos conectados > Conectar aparelho.
 4. Escaneie o QR.
-5. Quando conectar, salve a sessão pelo botão de sessão/Supabase.
+5. Depois de conectar, use o botão Sessão > Salvar Sessão se o Supabase estiver configurado.
 
 ## Conectar por código
 
-1. Clique em **Emparelhar com código**.
-2. Digite o número com país + DDD + número.
-3. Exemplo:
+1. Clique em Emparelhar com código.
+2. Informe o número com país + DDD + número, sem `+`.
+3. Exemplo: `5598999999999`.
+4. No WhatsApp: Aparelhos conectados > Conectar aparelho > Conectar com número de telefone.
+5. Digite o código exibido no painel.
 
-```txt
-5598999999999
-```
-
-4. Aguarde o código aparecer.
-5. No WhatsApp, vá em **Aparelhos conectados > Conectar um aparelho > Conectar com número de telefone**.
-6. Digite o código exibido.
-
-## Endpoints úteis
+## Endpoints
 
 ```txt
 GET  /api/health
@@ -81,14 +73,6 @@ POST /api/session/delete
 POST /api/session/save
 POST /api/session/restore
 POST /api/pairing-code
+GET  /api/grupos
+POST /api/enviar
 ```
-
-## Correção Render EACCES Chrome
-
-Esta versão resolve o erro:
-
-```txt
-Failed to launch the browser process: spawn /opt/render/.cache/puppeteer/chrome/linux-148.0.7778.97 EACCES
-```
-
-O bot agora localiza o executável real do Chrome dentro da pasta instalada pelo `@puppeteer/browsers`, aplica permissão `755` no binário e só então passa esse caminho para o WPPConnect/Puppeteer.

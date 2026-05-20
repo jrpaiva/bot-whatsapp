@@ -1,15 +1,15 @@
 services:
   - type: web
-    name: bot-whatsapp
+    name: bot-whatsapp-baileys
     env: node
     plan: free
     buildCommand: npm install
     startCommand: npm start
     envVars:
-      - key: WPP_TOKEN_DIR
-        value: /tmp/wppconnect-tokens
-      - key: PUPPETEER_CACHE_DIR
-        value: /opt/render/.cache/puppeteer
+      - key: NODE_VERSION
+        value: 20
+      - key: BAILEYS_AUTH_DIR
+        value: /tmp/baileys-auth
       - key: SUPABASE_URL
         sync: false
       - key: SUPABASE_SERVICE_ROLE_KEY
@@ -17,7 +17,11 @@ services:
       - key: SUPABASE_BUCKET
         value: whatsapp-sessions
       - key: SUPABASE_SESSION_PATH
-        value: wppconnect-tokens.zip
+        value: baileys-auth.zip
+      - key: SUPABASE_CONFIG_PATH
+        value: bot_config.json
+      - key: SUPABASE_PREDEFINIDAS_PATH
+        value: predefinidas.json
       - key: MCP_AUTH_TOKEN
         sync: false
       - key: LOG_MAX_ENTRIES
@@ -25,10 +29,10 @@ services:
       - key: LOG_AUTO_CLEAR_HOURS
         value: 12
       - key: MEMORY_WARN_MB
-        value: 420
+        value: 360
       - key: MEMORY_RESTART_MB
-        value: 500
-      - key: QR_REFRESH_MS
-        value: 0
+        value: 470
       - key: PAIRING_WAIT_MS
         value: 90000
+      - key: SESSION_AUTOSAVE_MS
+        value: 60000
