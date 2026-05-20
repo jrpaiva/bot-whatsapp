@@ -76,3 +76,8 @@ POST /api/pairing-code
 GET  /api/grupos
 POST /api/enviar
 ```
+
+
+## Correção v4.0.1
+
+- Fixado `baileys` em `6.7.16` porque `baileys@^7.0.0` não existe no npm e causa `ETARGET` no Render.
