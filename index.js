@@ -353,6 +353,37 @@ async function enviarMsg(grupo, mensagem, meta = {}) {
     } catch (e) { return { ok: false, msg: errMsg(e) }; }
 }
 
+// ─── CHROME AUTOINSTALL ────────────────────────────────────────────────────
+
+async function ensureChrome() {
+    const { execSync } = require('child_process');
+    const cacheDir = process.env.PUPPETEER_CACHE_DIR || '/opt/render/.cache/puppeteer';
+    mkdir(cacheDir);
+    let found = false;
+    try {
+        const chromeDir = require('path').join(cacheDir, 'chrome');
+        if (fs.existsSync(chromeDir)) {
+            const versions = fs.readdirSync(chromeDir).filter(f => f.startsWith('linux-'));
+            if (versions.length > 0) {
+                const exe = require('path').join(chromeDir, versions[0], 'chrome-linux64', 'chrome');
+                if (fs.existsSync(exe)) found = true;
+            }
+        }
+    } catch {}
+    if (!found) {
+        log('Info', 'Chrome não encontrado. Instalando...');
+        try {
+            execSync('npx puppeteer browsers install chrome', {
+                stdio: 'inherit', cwd: __dirname, timeout: 180000,
+            });
+            log('Info', 'Chrome instalado.');
+        } catch (e) {
+            log('Erro', 'Falha instalar Chrome', errMsg(e));
+            throw e;
+        }
+    }
+}
+
 // ─── WHATSAPP CLIENT (wppconnect) ─────────────────────────────────────────
 
 async function iniciarBot() {
@@ -362,6 +393,7 @@ async function iniciarBot() {
     mkdir(TOKEN_DIR);
     log('Info', `Tokens: ${TOKEN_DIR}`);
     try {
+        await ensureChrome();
         const wpp = await wppconnect.create({
             session: 'whatsapp-bot',
             headless: true,
