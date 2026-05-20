@@ -359,27 +359,37 @@ async function ensureChrome() {
     const { execSync } = require('child_process');
     const cacheDir = process.env.PUPPETEER_CACHE_DIR || '/opt/render/.cache/puppeteer';
     mkdir(cacheDir);
-    let found = false;
     try {
-        const chromeDir = require('path').join(cacheDir, 'chrome');
-        if (fs.existsSync(chromeDir)) {
-            const versions = fs.readdirSync(chromeDir).filter(f => f.startsWith('linux-'));
-            if (versions.length > 0) {
-                const exe = require('path').join(chromeDir, versions[0], 'chrome-linux64', 'chrome');
-                if (fs.existsSync(exe)) found = true;
-            }
-        }
+        const pp = require('puppeteer');
+        const exe = pp.executablePath();
+        if (exe && fs.existsSync(exe)) { log('Info', `Chrome: ${exe}`); return; }
     } catch {}
-    if (!found) {
-        log('Info', 'Chrome não encontrado. Instalando...');
+    log('Info', 'Chrome não encontrado. Instalando...');
+    try {
+        execSync('npx --no-install puppeteer browsers install chrome', {
+            stdio: 'inherit', cwd: __dirname, timeout: 180000,
+        });
+        log('Info', 'Chrome instalado.');
+    } catch (e) {
+        log('Erro', 'Falha instalar Chrome (tentando via @puppeteer/browsers)...');
         try {
-            execSync('npx puppeteer browsers install chrome', {
-                stdio: 'inherit', cwd: __dirname, timeout: 180000,
+            const pb = require('@puppeteer/browsers');
+            const cacheDir2 = process.env.PUPPETEER_CACHE_DIR || '/opt/render/.cache/puppeteer';
+            const installed = await pb.install({
+                browser: 'chrome', buildId: '148.0.7778.97',
+                cacheDir: cacheDir2, unpack: true,
             });
-            log('Info', 'Chrome instalado.');
-        } catch (e) {
-            log('Erro', 'Falha instalar Chrome', errMsg(e));
-            throw e;
+            log('Info', `Chrome instalado: ${installed.path}`);
+        } catch (e2) {
+            log('Erro', 'Falha instalar Chrome (tentando npx fallback)...');
+            try {
+                execSync('npx @puppeteer/browsers install chrome@148.0.7778.97 --path ' + cacheDir, {
+                    stdio: 'inherit', cwd: __dirname, timeout: 180000,
+                });
+            } catch (e3) {
+                log('Erro', 'Falha instalar Chrome', errMsg(e3));
+                throw e3;
+            }
         }
     }
 }
