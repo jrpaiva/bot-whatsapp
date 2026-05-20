@@ -1107,8 +1107,8 @@ async function iniciarBot() {
             }
 
             if (connection === 'open') {
-                const isAuthenticated = sock.user && sock.user.id;
-                if (isAuthenticated) {
+                const isRegistered = sock.authState?.creds?.registered === true;
+                if (isRegistered) {
                     addLog('Bot', 'Conectado com sucesso!');
                     qrCodeDataURL = null;
                     setBotState('ready', 'Conectado');
@@ -1117,12 +1117,12 @@ async function iniciarBot() {
                     invalidateGruposCache();
                     scheduleAll();
                 } else {
-                    addLog('Aviso', 'Conexão WebSocket aberta mas WhatsApp NÃO autenticado. Limpando sessão para gerar QR...');
+                    addLog('Aviso', 'Conexão aberta mas WhatsApp NÃO registrado. Limpando sessão parcial...');
                     qrCodeDataURL = null;
                     botConnected = false;
                     clientInstance = null;
                     await clearDirectory(AUTH_DIR);
-                    addLog('Bot', 'Sessão local limpa (credenciais parciais). Iniciando bot para gerar QR...');
+                    addLog('Bot', 'Sessão parcial limpa. Iniciando bot para gerar QR...');
                     iniciarBot();
                 }
             }
@@ -1130,14 +1130,16 @@ async function iniciarBot() {
             if (connection === 'close') {
                 const statusCode = lastDisconnect?.error?.output?.statusCode;
                 const loggedOut = statusCode === DisconnectReason.loggedOut;
+                const restartRequired = statusCode === DisconnectReason.restartRequired;
+                const wasInQrState = botState === 'qr' || qrCodeDataURL !== null;
                 botConnected = false;
                 qrCodeDataURL = null;
 
-                if (loggedOut) {
-                    addLog('Erro', 'Sessão expirada/logout. Limpando sessão local para gerar QR...');
+                if (loggedOut || (restartRequired && wasInQrState)) {
+                    const motivo = loggedOut ? 'logout' : 'QR expirado';
+                    addLog('Erro', `Sessão fechada (${motivo}). Limpando sessão local...`);
                     setBotState('disconnected', 'Sessão expirada');
                     clientInstance = null;
-                    qrCodeDataURL = null;
                     restarting = false;
                     invalidateGruposCache();
                     await clearDirectory(AUTH_DIR);
