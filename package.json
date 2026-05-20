@@ -1,6 +1,6 @@
 {
   "name": "whatsapp-bot-lembretes-baileys-render",
-  "version": "4.0.11-baileys-render-512mb-tailwind-panel",
+  "version": "4.0.12-tailwind-toasts-favicon",
   "description": "Bot WhatsApp Baileys para Render 512 MB com painel Tailwind, logs robustos e correção de sessão Signal/LID",
   "main": "index.js",
   "scripts": {

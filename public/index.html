@@ -4,6 +4,8 @@
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
 <title>WA Bot Baileys — Painel</title>
+<link rel="icon" type="image/png" href="/favicon.png"/>
+<link rel="apple-touch-icon" href="/favicon.png"/>
 <script src="https://cdn.tailwindcss.com"></script>
 <script>
   tailwind.config = {
@@ -46,7 +48,7 @@ body::before{content:"";position:fixed;inset:0;background-image:linear-gradient(
 .days-grid{display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:8px}.day-check input{display:none}.day-check span{display:flex;align-items:center;justify-content:center;min-height:40px;border:1px solid #20344a;border-radius:13px;color:#90a4b8;font-weight:900;background:#0d1722;cursor:pointer;padding:0 .7rem}.day-check input:checked+span{background:#25d366;color:#05220f;border-color:#25d366}
 .ag-day-filter{display:flex;gap:6px;flex-wrap:wrap}.ag-day-filter .day-check span{min-height:36px;min-width:48px;font-size:.8rem}
 .format-toolbar{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px}.whatsapp-preview{background:#0b141a;border:1px solid #20344a;border-radius:22px;overflow:hidden}.wa-top{min-height:56px;background:#202c33;display:flex;align-items:center;gap:10px;padding:8px 14px}.wa-avatar{width:32px;height:32px;border-radius:50%;background:#6b7c86;display:flex;align-items:center;justify-content:center;color:white;flex:0 0 auto}.wa-chat{min-height:214px;padding:18px;background-color:#0b141a;background-image:radial-gradient(#ffffff08 1px,transparent 1px);background-size:16px 16px}.wa-bubble{max-width:88%;margin-left:auto;background:#005c4b;color:#e9edef;border-radius:14px 0 14px 14px;padding:12px 14px;white-space:pre-wrap;font-size:.94rem;line-height:1.48;word-break:break-word}.wa-empty{color:#81929d;font-style:italic}.wa-time{text-align:right;color:#b7c8d0;font-size:.68rem;margin-top:6px}.predef-list{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px}.predef-card{background:#071018;border:1px solid #20344a;border-radius:16px;padding:14px;cursor:pointer;transition:.18s}.predef-card:hover{border-color:#25d366;transform:translateY(-1px)}.predef-title{font-weight:900;margin-bottom:6px}.predef-preview{color:#90a4b8;font-size:.82rem;line-height:1.4;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
-.toast-custom{position:fixed;right:24px;bottom:24px;z-index:70;background:#25d366;color:#05220f;border-radius:14px;padding:12px 16px;font-weight:900;transform:translateY(80px);opacity:0;transition:.25s}.toast-custom.show{transform:translateY(0);opacity:1}
+.toast-custom{position:fixed;right:24px;bottom:24px;z-index:70;max-width:min(420px,calc(100vw - 32px));background:#25d366;color:#05220f;border:1px solid rgba(255,255,255,.12);border-radius:16px;padding:13px 16px;font-weight:900;box-shadow:0 18px 55px rgba(0,0,0,.42);transform:translateY(80px);opacity:0;pointer-events:none;transition:.25s;display:flex;align-items:center;gap:10px}.toast-custom.show{transform:translateY(0);opacity:1}.toast-custom.info{background:#53bdeb;color:#061018}.toast-custom.success{background:#25d366;color:#05220f}.toast-custom.error{background:#ff5c7a;color:white}.toast-custom.warn{background:#ffd166;color:#241500}
 .alert{border-radius:16px;padding:12px 14px;border:1px solid #20344a;background:#101c2a;color:#e8f0f8}.alert-danger{border-color:#ff5c7a70;background:#ff5c7a14;color:#ffc2ce}.alert-success{border-color:#25d36680;background:#25d36617;color:#bbf7d0}.alert-info{border-color:#53bdeb80;background:#53bdeb14;color:#d6f1ff}.alert-dark{background:#071018;color:#e8f0f8}.d-none{display:none!important}.small{font-size:.84rem}.fw-bold{font-weight:800}.fw-black{font-weight:900}.h3{font-size:1.875rem;line-height:2.25rem}.h5{font-size:1.125rem;line-height:1.75rem}.mb-0{margin-bottom:0}.mt-1{margin-top:.25rem}.mt-2{margin-top:.5rem}.mt-3{margin-top:.75rem}.mb-1{margin-bottom:.25rem}.mb-2{margin-bottom:.5rem}.mb-3{margin-bottom:.75rem}.mb-4{margin-bottom:1rem}.p-4{padding:1rem}.w-50{width:50%}.w-100{width:100%}
 .row{display:grid;grid-template-columns:repeat(12,minmax(0,1fr));gap:1rem}.g-3{gap:1rem}.g-4{gap:1.25rem}.col-12{grid-column:span 12 / span 12}.col-lg-2{grid-column:span 2 / span 2}.col-lg-3{grid-column:span 3 / span 3}.col-lg-4{grid-column:span 4 / span 4}.col-lg-5{grid-column:span 5 / span 5}.col-lg-6{grid-column:span 6 / span 6}.col-lg-7{grid-column:span 7 / span 7}.d-flex{display:flex}.align-items-end{align-items:flex-end}.align-items-center{align-items:center}.justify-content-center{justify-content:center}.justify-content-between{justify-content:space-between}.justify-content-end{justify-content:flex-end}.gap-2{gap:.5rem}.gap-3{gap:.75rem}.flex-wrap{flex-wrap:wrap}.vstack{display:flex;flex-direction:column}
 .modal-shell{position:fixed;inset:0;z-index:60;align-items:center;justify-content:center;background:rgba(0,0,0,.68);backdrop-filter:blur(8px);padding:18px}.modal-panel{width:min(720px,100%);max-height:90vh;overflow:auto;background:linear-gradient(180deg,#101c2a,#071018);border:1px solid #20344a;border-radius:24px;box-shadow:0 30px 120px rgba(0,0,0,.5)}.modal-head,.modal-foot{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:18px;border-bottom:1px solid #20344a}.modal-foot{border-top:1px solid #20344a;border-bottom:0;justify-content:flex-end}.modal-body{padding:18px}.btn-close-x{width:38px;height:38px;border:1px solid #20344a;background:#071018;border-radius:13px;color:#90a4b8}
@@ -147,7 +149,7 @@ body::before{content:"";position:fixed;inset:0;background-image:linear-gradient(
 
 <div class="modal-shell hidden" id="pairingModal"><div class="modal-panel"><div class="modal-head"><div><h5 class="text-lg font-black">Emparelhar com código</h5><p class="muted small mt-1">Use o número com DDI e DDD, sem +. Ex: 5588999999999.</p></div><button class="btn-close-x" onclick="hideModal('pairingModal')"><i class="bi bi-x-lg"></i></button></div><div class="modal-body"><div class="mb-3"><label class="form-label">Número do WhatsApp</label><input class="form-control mt-2" id="pairing-phone" inputmode="numeric" placeholder="5588999999999"></div><div id="pairing-error" class="alert alert-danger d-none"></div><div id="pairing-result" class="alert alert-info d-none"></div></div><div class="modal-foot"><button class="btn btn-soft" onclick="hideModal('pairingModal')">Fechar</button><button class="btn btn-wa" id="btn-pairing-submit" onclick="gerarPairingCode()"><i class="bi bi-send"></i> Gerar código</button></div></div></div>
 
-<div id="toast" class="toast-custom">Salvo com sucesso</div>
+<div id="toast" class="toast-custom success"><i id="toast-icon" class="bi bi-check-circle-fill"></i><span id="toast-text">Salvo com sucesso</span></div>
 <script>
 
 function showModal(id) {
@@ -240,11 +242,33 @@ function normalizeAg(ag) {
   return { ...ag, id: ag.id || Date.now(), grupo: ag.grupo || '', grupoId: ag.grupoId || '', diasSemana: dias, horario, cron: buildCron(horario, dias) };
 }
 
-function showToast(text = 'Salvo com sucesso') {
+let toastTimer = null;
+function showToast(text = 'Operação concluída', type = 'success', timeout = 3200) {
   const toast = document.getElementById('toast');
-  toast.textContent = text;
-  toast.classList.add('show');
-  setTimeout(() => toast.classList.remove('show'), 2500);
+  const toastText = document.getElementById('toast-text');
+  const toastIcon = document.getElementById('toast-icon');
+  const icons = { success: 'bi-check-circle-fill', error: 'bi-x-circle-fill', warn: 'bi-exclamation-triangle-fill', info: 'bi-info-circle-fill' };
+  toastText.textContent = text;
+  toast.className = `toast-custom ${type}`;
+  toastIcon.className = `bi ${icons[type] || icons.success}`;
+  requestAnimationFrame(() => toast.classList.add('show'));
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => toast.classList.remove('show'), timeout);
+}
+
+function showInlineFeedback(el, text, type = 'info', autoHideMs = 0) {
+  if (!el) return;
+  const classes = { success: 'alert alert-success', error: 'alert alert-danger', info: 'alert alert-info', warn: 'alert alert-danger' };
+  el.className = classes[type] || classes.info;
+  el.textContent = text;
+  el.classList.remove('d-none');
+  if (el._hideTimer) clearTimeout(el._hideTimer);
+  if (autoHideMs > 0) {
+    el._hideTimer = setTimeout(() => {
+      el.classList.add('d-none');
+      el.textContent = '';
+    }, autoHideMs);
+  }
 }
 
 async function pollStatus() {
@@ -323,7 +347,7 @@ async function pollLogs(skipSchedule = false) {
 function copyLogs() {
   const text = lastLogs.map(l => `[${l.time}] [${l.type}] ${l.msg}`).join('\n');
   navigator.clipboard.writeText(text || 'Sem logs');
-  showToast('Logs copiados');
+  showToast('Logs copiados', 'success');
 }
 
 async function loadPredefinidas() {
@@ -385,7 +409,7 @@ async function savePredefAtual() {
   predefinidas = d.predefinidas || predefinidas;
   renderPredefinidas();
   hideModal('predefModal');
-  showToast('Predefinida salva');
+  showToast('Predefinida salva', 'success');
 }
 
 async function deletePredefAtual() {
@@ -402,7 +426,7 @@ async function deletePredefAtual() {
   predefinidas = d.predefinidas || [];
   renderPredefinidas();
   hideModal('predefModal');
-  showToast('Predefinida excluída');
+  showToast('Predefinida excluída', 'success');
 }
 
 function openUsePredefModal(textareaId) {
@@ -428,7 +452,7 @@ function usePredefinida(id) {
   el.value = item.mensagem || '';
   dispatchInput(el);
   hideModal('usePredefModal');
-  showToast('Predefinida aplicada');
+  showToast('Predefinida aplicada', 'success');
 }
 
 
@@ -771,7 +795,7 @@ function removeAg(i) {
 function setAllActive(active) {
   config.agendamentos = config.agendamentos.map(ag => normalizeAg({ ...ag, ativo: active }));
   renderAgs();
-  showToast(active ? 'Todos ativados' : 'Todos pausados');
+  showToast(active ? 'Todos ativados' : 'Todos pausados', 'success');
 }
 
 function validateConfig() {
@@ -812,7 +836,7 @@ async function saveOneAg(i) {
   if (d.config?.agendamentos) config.agendamentos = d.config.agendamentos.map(normalizeAg);
   expandedAgs.delete(ag.id);
   renderAgs();
-  showToast('Agendamento salvo');
+  showToast('Agendamento salvo', 'success');
 }
 
 async function saveConfig() {
@@ -830,7 +854,7 @@ async function saveConfig() {
   }
   expandedAgs.clear();
   renderAgs();
-  showToast('Configurações salvas');
+  showToast('Configurações salvas', 'success');
 }
 
 function updateManualPreview() {
@@ -879,51 +903,67 @@ async function enviarManual() {
   const btn = document.getElementById('btn-send');
 
   if (!grupo || !mensagem) {
-    result.className = 'alert alert-danger mt-3 mb-0';
-    result.classList.remove('d-none');
-    result.textContent = 'Preencha o grupo e a mensagem.';
+    showInlineFeedback(result, 'Preencha o grupo e a mensagem.', 'error', 4500);
+    showToast('Preencha o grupo e a mensagem', 'warn');
     return;
   }
 
   btn.disabled = true;
-  btn.innerHTML = '<span class="spinner-border spinner-border-sm"></span> Aguardando conexão/envio...';
+  btn.innerHTML = '<i class="bi bi-hourglass-split animate-spin"></i> Enviando...';
+  showInlineFeedback(result, 'Enviando mensagem...', 'info');
+  showToast('Enviando mensagem...', 'info', 1800);
 
-  const r = await fetch('/api/enviar', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ grupo, grupoId, mensagem }) });
-  const d = await r.json();
+  try {
+    const r = await fetch('/api/enviar', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ grupo, grupoId, mensagem }) });
+    const d = await r.json().catch(() => ({ ok:false, msg:'Resposta inválida do servidor.' }));
 
-  result.classList.remove('d-none');
-  if (d.ok) {
-    result.className = 'alert alert-success mt-3 mb-0';
-    result.textContent = 'Mensagem enviada com sucesso.';
-    document.getElementById('manual-msg').value = '';
-    updateManualPreview();
-  } else {
-    result.className = 'alert alert-danger mt-3 mb-0';
-    result.textContent = d.msg || 'Erro ao enviar.';
+    if (d.ok) {
+      const okMsg = d.msg || 'Mensagem enviada com sucesso.';
+      showInlineFeedback(result, okMsg, 'success', 4200);
+      showToast('Mensagem enviada com sucesso', 'success');
+      document.getElementById('manual-msg').value = '';
+      updateManualPreview();
+    } else {
+      const err = d.msg || 'Erro ao enviar.';
+      showInlineFeedback(result, err, 'error', 7000);
+      showToast(err, 'error', 5200);
+    }
+  } catch (e) {
+    const err = `Falha de rede ou servidor indisponível: ${e.message}`;
+    showInlineFeedback(result, err, 'error', 7000);
+    showToast('Falha ao enviar mensagem', 'error', 5200);
+  } finally {
+    btn.disabled = false;
+    btn.innerHTML = '<i class="bi bi-send-fill"></i> Enviar agora';
   }
-
-  btn.disabled = false;
-  btn.innerHTML = '<i class="bi bi-send-fill"></i> Enviar agora';
 }
 
 async function sendAgNow(i) {
   const ag = normalizeAg(config.agendamentos[i]);
   if (!ag.grupo || !ag.mensagem) {
-    alert('Este agendamento precisa de grupo e mensagem.');
+    showToast('Este agendamento precisa de grupo e mensagem', 'warn');
     return;
   }
-  const r = await fetch('/api/enviar', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ grupo: ag.grupo, grupoId: ag.grupoId, mensagem: ag.mensagem }) });
-  const d = await r.json().catch(() => ({ ok:false, msg:'Resposta inválida' }));
-  showToast(d.ok ? 'Mensagem do agendamento enviada' : (d.msg || 'Erro ao enviar'));
+  showToast(`Enviando para ${ag.grupo}...`, 'info', 1800);
+  try {
+    const r = await fetch('/api/enviar', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ grupo: ag.grupo, grupoId: ag.grupoId, mensagem: ag.mensagem }) });
+    const d = await r.json().catch(() => ({ ok:false, msg:'Resposta inválida' }));
+    showToast(d.ok ? 'Mensagem do agendamento enviada' : (d.msg || 'Erro ao enviar'), d.ok ? 'success' : 'error', d.ok ? 3200 : 5500);
+  } catch (e) {
+    showToast(`Falha ao enviar: ${e.message}`, 'error', 5500);
+  }
 }
 
 async function sessionAction(action) {
   const map = { save: '/api/session/save', restore: '/api/session/restore', delete: '/api/session/delete', restart: '/api/session/restart' };
   const labels = { save: 'Salvando sessão...', restore: 'Restaurando sessão...', delete: 'Excluindo sessão...', restart: 'Atualizando sessão e grupos...' };
+  const done = { save: 'Sessão salva.', restore: 'Sessão restaurada.', delete: 'Sessão excluída.', restart: 'Sessão e grupos atualizados.' };
   const box = document.getElementById('session-result');
-  box.className = 'alert alert-info';
-  box.textContent = labels[action];
-  box.classList.remove('d-none');
+
+  if (action === 'delete' && !confirm('Excluir a sessão local e o backup remoto? Será necessário conectar novamente.')) return;
+
+  showInlineFeedback(box, labels[action] || 'Executando...', 'info');
+  showToast(labels[action] || 'Executando...', 'info', 1800);
 
   try {
     const r = await fetch(map[action], { method: 'POST' });
@@ -932,15 +972,19 @@ async function sessionAction(action) {
     try { d = JSON.parse(raw); } catch { d = { ok:false, msg: raw || `HTTP ${r.status}` }; }
     if (!r.ok && d.ok !== true) d.ok = false;
 
-    box.className = d.ok ? 'alert alert-success' : 'alert alert-danger';
-    box.textContent = d.msg || (d.ok ? 'Operação concluída.' : `Falha na operação. HTTP ${r.status}`);
+    const msg = d.msg || (d.ok ? done[action] || 'Operação concluída.' : `Falha na operação. HTTP ${r.status}`);
+    showInlineFeedback(box, msg, d.ok ? 'success' : 'error', d.ok ? 4200 : 9000);
+    showToast(msg, d.ok ? 'success' : 'error', d.ok ? 3400 : 6500);
+
     if (d.ok) {
-      showToast(d.msg || 'Operação concluída');
-      if (action === 'restart') setTimeout(loadGrupos, 6000);
+      if (action === 'restart' || action === 'restore') setTimeout(loadGrupos, 6000);
+      setTimeout(pollStatus, 600);
+      setTimeout(pollLogs, 800);
     }
   } catch (e) {
-    box.className = 'alert alert-danger';
-    box.textContent = `Falha de rede ou servidor indisponível: ${e.message}`;
+    const msg = `Falha de rede ou servidor indisponível: ${e.message}`;
+    showInlineFeedback(box, msg, 'error', 9000);
+    showToast('Falha na ação de sessão', 'error', 6500);
   }
 }
 
@@ -983,14 +1027,17 @@ async function gerarPairingCode() {
       error.className = 'alert alert-danger';
       error.textContent = d.msg || 'Erro ao gerar código.';
       error.classList.remove('d-none');
+      showToast(error.textContent, 'error', 5500);
       return;
     }
     document.getElementById('pairing-code-display').textContent = d.code;
     result.classList.remove('d-none');
+    showToast('Código de pareamento gerado', 'success');
   } catch (e) {
     error.className = 'alert alert-danger';
     error.textContent = `Erro de conexão: ${e.message}`;
     error.classList.remove('d-none');
+    showToast('Erro ao gerar código', 'error', 5500);
   } finally {
     btn.disabled = false;
     btn.innerHTML = '<i class="bi bi-send"></i> Gerar código';
