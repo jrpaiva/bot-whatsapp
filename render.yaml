@@ -3,7 +3,7 @@ services:
     name: bot-whatsapp
     env: node
     plan: free
-    buildCommand: rm -rf node_modules package-lock.json && npm install
+    buildCommand: npm install
     startCommand: node index.js
     envVars:
       - key: WPP_TOKEN_DIR
@@ -20,3 +20,15 @@ services:
         value: wppconnect-tokens.zip
       - key: MCP_AUTH_TOKEN
         sync: false
+      - key: LOG_MAX_ENTRIES
+        value: 180
+      - key: LOG_AUTO_CLEAR_HOURS
+        value: 12
+      - key: MEMORY_WARN_MB
+        value: 420
+      - key: MEMORY_RESTART_MB
+        value: 500
+      - key: QR_REFRESH_MS
+        value: 0
+      - key: PAIRING_WAIT_MS
+        value: 90000

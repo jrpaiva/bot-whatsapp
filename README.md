@@ -1,172 +1,84 @@
-# WA Bot — Render + Supabase + Uptime
+# WA Bot — WPPConnect para Render 512 MB
 
-Bot de WhatsApp com painel web, envio manual, agendamento em horário de Brasília, backup manual da sessão e backup automático dos agendamentos no Supabase Storage.
+Versão ajustada para rodar no Render Free com 512 MB, usando WPPConnect e painel web.
 
-## Variáveis no Render
+## O que foi corrigido
+
+- QR Code agora é capturado pelo callback correto `catchQR`.
+- Pareamento por código agora usa `phoneNumber` + `catchLinkCode`, que é o fluxo correto do WPPConnect.
+- Removido o reinício automático agressivo do QR a cada 30s, que causava conflito de navegador aberto.
+- Reduzido volume de logs em memória.
+- Desativado log de update do WPPConnect.
+- Adicionados argumentos mais leves para Chromium.
+- Adicionada limpeza de locks antigos do Chrome na pasta da sessão.
+- Corrigido retorno de informações de Supabase no `/api/status`.
+
+## Variáveis recomendadas no Render
 
 ```env
-WWEBJS_AUTH_DIR=/tmp/.wwebjs_auth
-WWEBJS_READY_WAIT_MS=45000
+WPP_TOKEN_DIR=/tmp/wppconnect-tokens
+PUPPETEER_CACHE_DIR=/opt/render/.cache/puppeteer
+LOG_MAX_ENTRIES=180
+LOG_AUTO_CLEAR_HOURS=12
+MEMORY_WARN_MB=420
+MEMORY_RESTART_MB=500
+QR_REFRESH_MS=0
+PAIRING_WAIT_MS=90000
 SUPABASE_URL=https://SEU-PROJETO.supabase.co
 SUPABASE_SERVICE_ROLE_KEY=SUA_SERVICE_ROLE_KEY
 SUPABASE_BUCKET=whatsapp-sessions
-SUPABASE_SESSION_PATH=wwebjs_auth.zip
+SUPABASE_SESSION_PATH=wppconnect-tokens.zip
 SUPABASE_CONFIG_PATH=bot_config.json
+MCP_AUTH_TOKEN=troque-por-uma-chave-grande-e-secreta
 ```
 
-## Supabase
-
-Crie um bucket privado no Storage:
-
-```txt
-whatsapp-sessions
-```
-
-Configuração recomendada:
-
-```txt
-Public bucket: OFF
-Restrict file size: 50MB ou 100MB
-Restrict MIME types: application/zip e application/json
-```
-
-## Endpoint para UptimeRobot / cron-job.org
-
-Use este endpoint para manter o Render Free acordado:
-
-```txt
-https://SEU-APP.onrender.com/api/health
-```
-
-Configuração recomendada:
-
-```txt
-Método: GET
-Intervalo: 5 minutos
-```
-
-Também existem:
-
-```txt
-/health
-/ping
-/api/status
-```
-
-O endpoint mais leve para uptime é:
-
-```txt
-/api/health
-```
-
-## Fluxo de sessão
-
-1. Faça deploy.
-2. Escaneie o QR Code.
-3. Aguarde aparecer `Conectado com sucesso!`.
-4. Clique em `Sessão > Salvar Sessão`.
-5. Em novo deploy, clique em `Sessão > Restaurar`.
-6. Aguarde o status mudar para `Conectado` antes de testar envio.
-
-## Agendamentos
-
-Os agendamentos são salvos em `bot_config.json` no Supabase Storage quando você clica em `Salvar tudo`. Ao iniciar ou restaurar sessão, o bot tenta restaurar esses agendamentos automaticamente.
-
-Os horários são informados diretamente em horário de Brasília. O sistema gera o cron automaticamente usando:
-
-```txt
-America/Sao_Paulo
-```
-
-## Rodar local
+## Deploy
 
 ```bash
 npm install
 npm start
 ```
 
-## MCP remoto
-
-Esta versão inclui um endpoint MCP/JSON-RPC protegido por token para ferramentas externas controlarem o bot.
-
-Variáveis:
-
-```env
-MCP_AUTH_TOKEN=troque-por-uma-chave-grande-e-secreta
-MCP_ENDPOINT=/mcp
-```
-
-Endpoint:
+No Render:
 
 ```txt
-https://SEU-APP.onrender.com/mcp
+Build Command: npm install
+Start Command: node index.js
 ```
 
-Autenticação:
+## Conectar por QR Code
 
-```http
-Authorization: Bearer SEU_MCP_AUTH_TOKEN
-```
+1. Abra o painel do Render.
+2. Aguarde aparecer o QR Code.
+3. No WhatsApp, vá em **Aparelhos conectados > Conectar um aparelho**.
+4. Escaneie o QR.
+5. Quando conectar, salve a sessão pelo botão de sessão/Supabase.
 
-Ferramentas expostas:
+## Conectar por código
+
+1. Clique em **Emparelhar com código**.
+2. Digite o número com país + DDD + número.
+3. Exemplo:
 
 ```txt
-listar_status_bot
-listar_grupos
-listar_agendamentos
-criar_agendamento
-editar_agendamento
-excluir_agendamento
-ativar_agendamento
-pausar_agendamento
-listar_predefinidas
-criar_predefinida
-editar_predefinida
-excluir_predefinida
-enviar_mensagem_teste
-listar_logs
-salvar_sessao
-restaurar_sessao
-excluir_sessao
-atualizar_sessao_e_grupos
+5598999999999
 ```
 
-Teste manual com curl:
+4. Aguarde o código aparecer.
+5. No WhatsApp, vá em **Aparelhos conectados > Conectar um aparelho > Conectar com número de telefone**.
+6. Digite o código exibido.
 
-```bash
-curl -X POST "https://SEU-APP.onrender.com/mcp" \
-  -H "Authorization: Bearer SEU_MCP_AUTH_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}'
-```
-
-Exemplo de chamada de ferramenta:
-
-```bash
-curl -X POST "https://SEU-APP.onrender.com/mcp" \
-  -H "Authorization: Bearer SEU_MCP_AUTH_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"listar_status_bot","arguments":{}}}'
-```
-
-## Ajustes de logs e memória
-
-Esta versão reduz o volume de logs em memória e ajuda a diagnosticar quedas por RAM no Render Free.
-
-Variáveis opcionais:
-
-```env
-LOG_MAX_ENTRIES=180
-LOG_AUTO_CLEAR_HOURS=12
-LOG_CRON_DETAILS=false
-MEMORY_WARN_MB=450
-```
-
-Endpoints úteis:
+## Endpoints úteis
 
 ```txt
+GET  /api/health
+GET  /api/status
 GET  /api/memory
+GET  /api/logs
 POST /api/logs/clear
+POST /api/session/restart
+POST /api/session/delete
+POST /api/session/save
+POST /api/session/restore
+POST /api/pairing-code
 ```
-
-Por padrão, os logs são limpos automaticamente a cada 12 horas e o sistema mantém no máximo 180 entradas em memória.

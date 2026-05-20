@@ -11,16 +11,19 @@ const { createClient } = require('@supabase/supabase-js');
 const app = express();
 const PORT = process.env.PORT || 3000;
 const TOKEN_DIR = process.env.WPP_TOKEN_DIR || '/tmp/wppconnect-tokens';
+const SESSION_NAME = process.env.WPP_SESSION_NAME || 'whatsapp-bot';
+const SESSION_PATH = path.join(TOKEN_DIR, SESSION_NAME);
 const CONFIG_FILE = process.env.BOT_CONFIG_FILE || path.join('/tmp', 'bot_config.json');
 const BRASILIA_TZ = 'America/Sao_Paulo';
 const STARTED_AT = new Date();
 const MCP_AUTH_TOKEN = process.env.MCP_AUTH_TOKEN || '';
 const MCP_ENDPOINT = process.env.MCP_ENDPOINT || '/mcp';
-const LOG_MAX = Number(process.env.LOG_MAX_ENTRIES || 300);
-const LOG_CLEAR_H = Number(process.env.LOG_AUTO_CLEAR_HOURS || 6);
+const LOG_MAX = Number(process.env.LOG_MAX_ENTRIES || 180);
+const LOG_CLEAR_H = Number(process.env.LOG_AUTO_CLEAR_HOURS || 12);
 const MEM_WARN_MB = Number(process.env.MEMORY_WARN_MB || 420);
 const MEM_RESTART_MB = Number(process.env.MEMORY_RESTART_MB || 500);
-const QR_REFRESH_MS = Number(process.env.QR_REFRESH_MS || 30000);
+const QR_REFRESH_MS = Number(process.env.QR_REFRESH_MS || 0);
+const PAIRING_WAIT_MS = Number(process.env.PAIRING_WAIT_MS || 90000);
 const RECONNECT_DELAY_MS = Number(process.env.RECONNECT_DELAY_MS || 5000);
 
 const SUPABASE_URL = process.env.SUPABASE_URL || '';
@@ -64,12 +67,23 @@ let pendingAcks = {};
 let qrRefreshTimer = null;
 let reconnectTimer = null;
 let shuttingDown = false;
+let startPromise = null;
+let pairingPhone = '';
+let lastPairingCode = '';
+let pairingWaiters = [];
 
 let gruposCache = { list: null, at: 0, building: false };
 const CACHE_TTL = 2 * 60 * 1000;
 const invalCache = () => { gruposCache = { list: null, at: 0, building: false }; };
 
 const getClient = () => (client && botConnected ? client : null);
+const clearChromeLocks = async () => {
+    try {
+        for (const f of ['SingletonLock', 'SingletonSocket', 'SingletonCookie']) {
+            await fs.promises.rm(path.join(SESSION_PATH, f), { force: true });
+        }
+    } catch {}
+};
 const setState = (s, msg) => { botState = s; botStatus = msg; };
 
 const log = (type, msg, extra = null) => {
@@ -213,7 +227,7 @@ const zipDir = async (src, out) => {
 const saveSessionRemote = async () => {
     reqSup();
     mkdir(TOKEN_DIR);
-    const sessionPath = path.join(TOKEN_DIR, 'whatsapp-bot');
+    const sessionPath = SESSION_PATH
     if (!fs.existsSync(sessionPath)) throw new Error(`Sessão não encontrada: ${sessionPath}`);
     const tmp = `/tmp/sess_${Date.now()}.zip`;
     const bytes = await zipDir(sessionPath, tmp);
@@ -241,7 +255,7 @@ const restoreSessionRemote = async () => {
     await fs.promises.writeFile(tmp, Buffer.from(await data.arrayBuffer()));
     await pararBot(true);
     await rmrf(TOKEN_DIR);
-    const sessionPath = path.join(TOKEN_DIR, 'whatsapp-bot');
+    const sessionPath = SESSION_PATH
     mkdir(sessionPath);
     await new Promise((res, rej) => { fs.createReadStream(tmp).pipe(unzipper.Extract({ path: sessionPath })).on('close', res).on('error', rej); });
     await fs.promises.rm(tmp, { force: true });
@@ -260,7 +274,7 @@ async function ensureChrome() {
             cacheDir, unpack: true,
         });
         log('Info', `Chrome: ${installed.path}`);
-        return;
+        return installed.path;
     } catch (e) {
         log('Info', `@puppeteer/browsers fallback: ${errMsg(e)}`);
     }
@@ -270,6 +284,7 @@ async function ensureChrome() {
             stdio: 'ignore', timeout: 180000,
         });
         log('Info', 'Chrome instalado via npx');
+        return null;
     } catch (e2) {
         log('Erro', 'Falha Chrome', errMsg(e2));
         throw e2;
@@ -282,6 +297,9 @@ async function pararBot(keep = false) {
     setState('restarting', 'Parando...');
     if (qrRefreshTimer) { clearTimeout(qrRefreshTimer); qrRefreshTimer = null; }
     if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+    if (startPromise) {
+        try { await Promise.race([startPromise, wait(15000)]); } catch {}
+    }
     Object.values(scheduledJobs).forEach(j => j.stop());
     scheduledJobs = {};
     invalCache();
@@ -292,199 +310,258 @@ async function pararBot(keep = false) {
     if (old) {
         try {
             if (typeof old.close === 'function') await old.close();
+            try {
+                const b = old.page?.browser ? old.page.browser() : null;
+                if (b && typeof b.close === 'function') await b.close();
+            } catch {}
         } catch (e) { log('Aviso', 'Erro stop', errMsg(e)); }
+        await wait(1200);
+        await clearChromeLocks();
     }
     if (!keep) { restarting = false; qrDataURL = null; qrString = null; }
 }
 
 async function reiniciarBot(keep = false) {
+    if (startPromise) { log('Bot', 'Inicialização já em andamento.'); return; }
     log('Bot', 'Reiniciando...');
     await pararBot(true);
-    await wait(1500);
+    await wait(2500);
     await iniciarBot();
 }
 
+function resolvePairingWaiters(code) {
+    lastPairingCode = code || '';
+    const waiters = pairingWaiters.splice(0);
+    waiters.forEach(w => w.resolve(lastPairingCode));
+}
+
+function waitPairingCode(timeoutMs = PAIRING_WAIT_MS) {
+    if (lastPairingCode) return Promise.resolve(lastPairingCode);
+    return new Promise(resolve => {
+        const item = { resolve: code => { clearTimeout(item.to); resolve(code || null); }, to: null };
+        item.to = setTimeout(() => {
+            pairingWaiters = pairingWaiters.filter(w => w !== item);
+            resolve(null);
+        }, timeoutMs);
+        pairingWaiters.push(item);
+    });
+}
+
 async function iniciarBot() {
-    if (client) return;
+    if (client || startPromise) return startPromise;
     if (shuttingDown) return;
-    initialSyncDone = false;
-    setState('launching', 'Iniciando WhatsApp...');
-    mkdir(TOKEN_DIR);
-    log('Info', `Tokens: ${TOKEN_DIR}`);
-    try {
-        await ensureChrome();
-        const wpp = await wppconnect.create({
-            session: 'whatsapp-bot',
-            headless: true,
-            useChrome: false,
-            disableWelcome: true,
-            logQR: false,
-            autoClose: 0,
-            deviceName: 'WA Bot',
-            folderNameToken: TOKEN_DIR,
-            browserArgs: [
-                '--no-sandbox',
-                '--disable-setuid-sandbox',
-                '--disable-gpu',
-                '--disable-dev-shm-usage',
-                '--disable-software-rasterizer',
-                '--no-first-run',
-                '--no-zygote',
-            ],
-            onStateChange: state => {
-                log('Estado', `WhatsApp: ${state}`);
-                if (state === 'CONNECTED' || state === 'isLogged') {
-                    qrDataURL = null;
-                    qrString = null;
-                    setState('ready', 'Conectado');
-                    botConnected = true;
-                    restarting = false;
-                    if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
-                    if (!initialSyncDone) {
-                        initialSyncDone = true;
-                        invalCache();
-                        scheduleAll();
-                        listGroups().catch(() => {});
-                    }
-                }
-                if (state === 'QRCode') {
-                    setState('qr', 'Aguardando escaneamento...');
-                    botConnected = false;
-                    restarting = false;
-                }
-                if (state === 'DISCONNECTED' || state === 'CONFLICT' || state === 'UNPAIRED' || state === 'UNPAIRED_IDLE') {
-                    botConnected = false;
-                    if (state === 'CONFLICT') log('Erro', 'Conflito: outro dispositivo');
-                    if (!shuttingDown && !restarting) {
-                        log('Bot', `Desconectado (${state}). Reconectando em ${RECONNECT_DELAY_MS/1000}s...`);
-                        if (reconnectTimer) clearTimeout(reconnectTimer);
-                        reconnectTimer = setTimeout(() => { reconnectTimer = null; reiniciarBot(); }, RECONNECT_DELAY_MS);
-                    }
-                }
-            },
-            onQRCode: async (qr) => {
-                qrString = qr;
-                try {
-                    qrDataURL = await qrcode.toDataURL(qr);
-                    log('QR', 'Novo QR Code disponível no painel.');
-                    scheduleQRRefresh();
-                } catch (e) { log('Erro', 'Falha QR', errMsg(e)); }
-            },
-        });
 
-        client = wpp;
-
-        wpp.onAck(async (ack) => {
-            const id = ack?.id || ack?._serialized || '';
-            const status = ack?.status ?? ack?.ack ?? -1;
-            const cb = pendingAcks[id];
-            if (cb) cb(status);
-        });
-
-        wpp.onParticipantsChanged(async () => { invalCache(); });
-
-        wpp.onMessage(async (msg) => {
-            try {
-                const isGroup = msg.isGroupMsg === true || msg.isGroup === true;
-                const from = isGroup ? (msg.chat?.name || msg.chat?.formattedTitle || msg.sender?.pushname || 'Alguém') : (msg.sender?.pushname || msg.notifyName || 'Alguém');
-                const text = (msg.body || msg.content || '').trim();
-                if (!text) return;
-                const lower = text.toLowerCase();
-
-                if (lower === '!ping') {
-                    await wpp.sendText(msg.from, '🏓 Pong!');
-                    return;
-                }
-                if (lower.startsWith('!echo ')) {
-                    await wpp.sendText(msg.from, text.slice(6));
-                    return;
-                }
-                if (lower === '!status' || lower === '!bot') {
-                    const st = mcpStatus();
-                    await wpp.sendText(msg.from, `🤖 Bot WhatsApp\nStatus: ${st.connected ? '✅ Conectado' : '❌ Desconectado'}\nAgendamentos: ${st.agendamentosAtivos}/${st.agendamentos} ativos\nUptime: ${Math.floor(st.uptimeSeconds / 60)}min`);
-                    return;
-                }
-
-                if (!isGroup && (lower === 'menu' || lower === '!menu' || lower === 'help' || lower === '!help')) {
-                    await wpp.sendText(msg.from, `🤖 *Comandos disponíveis*\n\n!ping — Testar resposta\n!echo <texto> — Repetir mensagem\n!status — Status do bot\n!menu — Esta mensagem\n\n💡 Envie seu número (ex: 5511999999999) para gerar código de emparelhamento.`);
-                    return;
-                }
-
-                if (!isGroup && /^\d{10,15}$/.test(text)) {
+    startPromise = (async () => {
+        initialSyncDone = false;
+        setState(pairingPhone ? 'pairing' : 'launching', pairingPhone ? 'Gerando código de emparelhamento...' : 'Iniciando WhatsApp...');
+        mkdir(TOKEN_DIR);
+        await clearChromeLocks();
+        log('Info', `Tokens: ${TOKEN_DIR}`);
+        try {
+            const chromePath = await ensureChrome();
+            const wpp = await wppconnect.create({
+                session: SESSION_NAME,
+                headless: true,
+                useChrome: false,
+                disableWelcome: true,
+                disableGoogleAnalytics: true,
+                updatesLog: false,
+                logQR: false,
+                autoClose: 0,
+                deviceSyncTimeout: 0,
+                waitForLogin: false,
+                deviceName: 'WA Bot Render',
+                folderNameToken: TOKEN_DIR,
+                phoneNumber: pairingPhone || undefined,
+                puppeteerOptions: {
+                    executablePath: chromePath || process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
+                    timeout: 120000,
+                    protocolTimeout: 120000,
+                },
+                browserArgs: [
+                    '--no-sandbox',
+                    '--disable-setuid-sandbox',
+                    '--disable-dev-shm-usage',
+                    '--disable-gpu',
+                    '--disable-software-rasterizer',
+                    '--no-first-run',
+                    '--no-default-browser-check',
+                    '--disable-extensions',
+                    '--disable-background-networking',
+                    '--disable-background-timer-throttling',
+                    '--disable-renderer-backgrounding',
+                    '--disable-sync',
+                    '--disable-translate',
+                    '--mute-audio',
+                    '--metrics-recording-only',
+                    '--disable-features=Translate,BackForwardCache,MediaRouter,OptimizationHints',
+                    '--js-flags=--max-old-space-size=128',
+                ],
+                catchQR: async (base64Qr, asciiQR, attempts, urlCode) => {
                     try {
-                        const result = await gerarPairingCode(text);
-                        if (result) {
-                            await wpp.sendText(msg.from, `🔐 *Código de Emparelhamento*\n\nCódigo: ${result}\n\nAbra WhatsApp > Aparelhos Conectados > Conectar um dispositivo\nDigite o código acima.`);
-                        } else {
-                            await wpp.sendText(msg.from, '❌ Não foi possível gerar o código de emparelhamento. Use o QR Code no painel.');
-                        }
-                    } catch (e) {
-                        await wpp.sendText(msg.from, `❌ Erro: ${errMsg(e)}`);
+                        qrString = urlCode || base64Qr || '';
+                        if (base64Qr && String(base64Qr).startsWith('data:image')) qrDataURL = base64Qr;
+                        else if (urlCode) qrDataURL = await qrcode.toDataURL(urlCode);
+                        else if (base64Qr) qrDataURL = await qrcode.toDataURL(base64Qr);
+                        setState('qr', `Aguardando QR Code${attempts ? ` (${attempts})` : ''}`);
+                        botConnected = false;
+                        restarting = false;
+                        log('QR', 'Novo QR Code disponível no painel.');
+                        scheduleQRRefresh();
+                    } catch (e) { log('Erro', 'Falha QR', errMsg(e)); }
+                },
+                catchLinkCode: (code) => {
+                    const clean = String(code || '').trim();
+                    if (!clean) return;
+                    setState('pairing_code', 'Código de emparelhamento gerado.');
+                    log('Pairing', `Código gerado: ${clean}`);
+                    resolvePairingWaiters(clean);
+                },
+                statusFind: (statusSession) => {
+                    log('Sessão', String(statusSession));
+                    if (statusSession === 'isLogged' || statusSession === 'qrReadSuccess') {
+                        qrDataURL = null;
+                        qrString = null;
+                        pairingPhone = '';
+                        lastPairingCode = '';
+                        setState('authenticated', 'WhatsApp autenticado. Finalizando conexão...');
                     }
-                    return;
-                }
-            } catch (e) {
-                log('Erro', 'onMessage', errMsg(e));
-            }
-        });
+                    if (statusSession === 'notLogged') setState(pairingPhone ? 'pairing' : 'qr', pairingPhone ? 'Aguardando código de emparelhamento...' : 'Aguardando QR Code...');
+                    if (statusSession === 'autocloseCalled') log('Aviso', 'Auto close chamado pelo WPPConnect.');
+                },
+                onStateChange: state => {
+                    log('Estado', `WhatsApp: ${state}`);
+                    if (state === 'CONNECTED' || state === 'isLogged') {
+                        qrDataURL = null;
+                        qrString = null;
+                        pairingPhone = '';
+                        lastPairingCode = '';
+                        setState('ready', 'Conectado');
+                        botConnected = true;
+                        restarting = false;
+                        if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+                        if (!initialSyncDone) {
+                            initialSyncDone = true;
+                            invalCache();
+                            scheduleAll();
+                            listGroups().catch(() => {});
+                        }
+                    }
+                    if (state === 'QRCode' || state === 'QR') {
+                        setState('qr', 'Aguardando escaneamento...');
+                        botConnected = false;
+                        restarting = false;
+                    }
+                    if (state === 'DISCONNECTED' || state === 'CONFLICT' || state === 'UNPAIRED' || state === 'UNPAIRED_IDLE') {
+                        botConnected = false;
+                        if (state === 'CONFLICT') log('Erro', 'Conflito: outro dispositivo');
+                        if (!shuttingDown && !restarting && !pairingPhone) {
+                            log('Bot', `Desconectado (${state}). Reconectando em ${RECONNECT_DELAY_MS/1000}s...`);
+                            if (reconnectTimer) clearTimeout(reconnectTimer);
+                            reconnectTimer = setTimeout(() => { reconnectTimer = null; reiniciarBot(); }, RECONNECT_DELAY_MS);
+                        }
+                    }
+                },
+            });
 
-        log('Bot', 'Aguardando conexão...');
-        if (client && client.page) {
+            client = wpp;
+
+            wpp.onAck(async (ack) => {
+                const id = ack?.id || ack?._serialized || '';
+                const status = ack?.status ?? ack?.ack ?? -1;
+                const cb = pendingAcks[id];
+                if (cb) cb(status);
+            });
+
+            wpp.onParticipantsChanged(async () => { invalCache(); });
+
+            wpp.onMessage(async (msg) => {
+                try {
+                    const isGroup = msg.isGroupMsg === true || msg.isGroup === true;
+                    const from = isGroup ? (msg.chat?.name || msg.chat?.formattedTitle || msg.sender?.pushname || 'Alguém') : (msg.sender?.pushname || msg.notifyName || 'Alguém');
+                    const text = (msg.body || msg.content || '').trim();
+                    if (!text) return;
+                    const lower = text.toLowerCase();
+
+                    if (lower === '!ping') {
+                        await wpp.sendText(msg.from, '🏓 Pong!');
+                        return;
+                    }
+                    if (lower.startsWith('!echo ')) {
+                        await wpp.sendText(msg.from, text.slice(6));
+                        return;
+                    }
+                    if (lower === '!status' || lower === '!bot') {
+                        const st = mcpStatus();
+                        await wpp.sendText(msg.from, `🤖 Bot WhatsApp\nStatus: ${st.connected ? '✅ Conectado' : '❌ Desconectado'}\nAgendamentos: ${st.agendamentosAtivos}/${st.agendamentos} ativos\nUptime: ${Math.floor(st.uptimeSeconds / 60)}min`);
+                        return;
+                    }
+
+                    if (!isGroup && (lower === 'menu' || lower === '!menu' || lower === 'help' || lower === '!help')) {
+                        await wpp.sendText(msg.from, `🤖 *Comandos disponíveis*\n\n!ping — Testar resposta\n!echo <texto> — Repetir mensagem\n!status — Status do bot\n!menu — Esta mensagem`);
+                    }
+                } catch (e) {
+                    log('Erro', 'onMessage', errMsg(e));
+                }
+            });
+
+            log('Bot', 'Aguardando conexão...');
             try {
-                const exists = await fs.promises.access(path.join(TOKEN_DIR, 'whatsapp-bot', 'Default', 'Local Storage', 'leveldb')).then(() => true).catch(() => false);
+                const exists = await fs.promises.access(path.join(SESSION_PATH, 'Default', 'Local Storage', 'leveldb')).then(() => true).catch(() => false);
                 if (exists) log('Info', 'Sessão existente detectada.');
             } catch {}
+        } catch (e) {
+            log('Erro', 'Falha iniciar bot', errMsg(e));
+            client = null;
+            botConnected = false;
+            restarting = false;
+            resolvePairingWaiters(null);
+            await clearChromeLocks();
+            if (!shuttingDown && !pairingPhone) {
+                log('Bot', `Tentando novamente em ${RECONNECT_DELAY_MS/1000}s...`);
+                if (reconnectTimer) clearTimeout(reconnectTimer);
+                reconnectTimer = setTimeout(() => { reconnectTimer = null; iniciarBot(); }, RECONNECT_DELAY_MS);
+            }
+        } finally {
+            startPromise = null;
         }
-    } catch (e) {
-        log('Erro', 'Falha iniciar bot', errMsg(e));
-        client = null;
-        restarting = false;
-        if (!shuttingDown) {
-            log('Bot', `Tentando novamente em ${RECONNECT_DELAY_MS/1000}s...`);
-            setTimeout(() => { if (!client && !shuttingDown) iniciarBot(); }, RECONNECT_DELAY_MS);
-        }
-    }
+    })();
+    return startPromise;
 }
 
 function scheduleQRRefresh() {
     if (qrRefreshTimer) clearTimeout(qrRefreshTimer);
+    if (!QR_REFRESH_MS || QR_REFRESH_MS <= 0) return;
     qrRefreshTimer = setTimeout(() => {
         qrRefreshTimer = null;
-        if (!botConnected && !shuttingDown) {
-            log('QR', 'QR expirado, solicitando novo...');
+        if (!botConnected && !shuttingDown && !startPromise) {
+            log('QR', 'QR expirado. Reiniciando por configuração QR_REFRESH_MS...');
             reiniciarBot();
         }
     }, QR_REFRESH_MS);
 }
 
 async function gerarPairingCode(phone) {
+    const cleanPhone = String(phone || '').replace(/\D/g, '');
+    if (!cleanPhone || cleanPhone.length < 10 || cleanPhone.length > 15) return null;
+    if (botConnected) return null;
+
     try {
-        if (client && typeof client.requestPairingCode === 'function') {
-            const result = await client.requestPairingCode(phone);
-            return result?.pairingCode || result?.code || result || null;
+        lastPairingCode = '';
+        pairingPhone = cleanPhone;
+        resolvePairingWaiters(null);
+        log('Pairing', `Solicitando código para ${cleanPhone}`);
+        if (startPromise && !client) {
+            setState('pairing', 'Aguardando inicialização atual para trocar para código...');
+            try { await Promise.race([startPromise, wait(20000)]); } catch {}
         }
-        const puppeteer = require('puppeteer');
-        const browser = await puppeteer.connect({ browserURL: 'http://127.0.0.1:9222' }).catch(() => null);
-        if (browser) {
-            const pages = await browser.pages();
-            const waPage = pages.find(p => p.url().includes('web.whatsapp.com'));
-            if (waPage) {
-                const code = await waPage.evaluate((phone) => {
-                    return new Promise((resolve) => {
-                        if (typeof window.Store?.Lid?.requestPairingCode === 'function') {
-                            window.Store.Lid.requestPairingCode(phone).then(resolve).catch(() => resolve(null));
-                        } else {
-                            resolve(null);
-                        }
-                    });
-                }, phone);
-                if (code) return code;
-            }
-            await browser.disconnect();
-        }
-        return null;
+        await pararBot(true);
+        await wait(2500);
+        await iniciarBot();
+        return await waitPairingCode(PAIRING_WAIT_MS);
     } catch (e) {
         log('Aviso', 'Pairing code', errMsg(e));
+        resolvePairingWaiters(null);
         return null;
     }
 }
@@ -728,8 +805,8 @@ app.post(MCP_ENDPOINT, mcpAuth, async (req, res) => {
 
 app.get('/api/status', (req, res) => res.json({
     connected: botConnected, state: botState, status: botStatus, restarting,
-    qr: qrDataURL,
-    supabaseConfigured: Boolean(supabase),
+    qr: qrDataURL, qrRaw: qrString, pairingCode: lastPairingCode,
+    supabaseConfigured: Boolean(supabase), supabaseBucket: SUPABASE_BUCKET, supabaseSessionPath: SUPABASE_SESSION_PATH,
     uptimeSeconds: Math.floor(process.uptime()), startedAt: STARTED_AT.toISOString(),
     gruposCacheValido: Boolean(gruposCache.list), gruposCacheTotal: gruposCache.list?.length || 0,
 }));
@@ -760,9 +837,6 @@ app.post('/api/pairing-code', async (req, res) => {
         if (!phone || phone.length < 10 || phone.length > 15) {
             return res.status(400).json({ ok: false, msg: 'Número inválido. Use código do país + DDD + número (5511999999999).' });
         }
-        if (!client) {
-            return res.status(503).json({ ok: false, msg: 'WhatsApp não inicializado. Aguarde o bot conectar.' });
-        }
         if (botConnected) {
             return res.status(400).json({ ok: false, msg: 'Bot já conectado. Não é necessário emparelhar.' });
         }
@@ -771,7 +845,7 @@ app.post('/api/pairing-code', async (req, res) => {
             log('Pairing', `Código gerado para ${phone}`);
             res.json({ ok: true, code });
         } else {
-            res.status(501).json({ ok: false, msg: 'Emparelhamento não suportado nesta versão. Use o QR Code no painel ou atualize o wppconnect para v2.' });
+            res.status(504).json({ ok: false, msg: 'Não foi possível gerar o código dentro do tempo limite. Tente novamente ou use o QR Code no painel.' });
         }
     } catch (e) {
         res.status(500).json({ ok: false, msg: errMsg(e) });
