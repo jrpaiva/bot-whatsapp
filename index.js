@@ -8,7 +8,12 @@ const path = require('path');
 const archiver = require('archiver');
 const unzipper = require('unzipper');
 const pino = require('pino');
+const WebSocket = require('ws');
 const { createClient } = require('@supabase/supabase-js');
+
+// Supabase v2 precisa de WebSocket explícito no Node 20 usado pelo Render.
+// Sem isso o processo cai antes de iniciar o servidor.
+if (!globalThis.WebSocket) globalThis.WebSocket = WebSocket;
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -30,7 +35,7 @@ const MARK_ONLINE_ON_CONNECT = String(process.env.MARK_ONLINE_ON_CONNECT || 'fal
 
 const SUPABASE_URL = process.env.SUPABASE_URL || '';
 const SUPABASE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY || '';
-const supabase = SUPABASE_URL && SUPABASE_KEY ? createClient(SUPABASE_URL, SUPABASE_KEY) : null;
+const supabase = SUPABASE_URL && SUPABASE_KEY ? createClient(SUPABASE_URL, SUPABASE_KEY, { realtime: { transport: WebSocket } }) : null;
 const SUPABASE_BUCKET = process.env.SUPABASE_BUCKET || 'whatsapp-sessions';
 const SUPABASE_SESSION_PATH = process.env.SUPABASE_SESSION_PATH || 'baileys-auth.zip';
 const SUPABASE_CONFIG_PATH = process.env.SUPABASE_CONFIG_PATH || 'bot_config.json';
