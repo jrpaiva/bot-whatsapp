@@ -82,3 +82,13 @@ POST /api/session/save
 POST /api/session/restore
 POST /api/pairing-code
 ```
+
+## Correção Render EACCES Chrome
+
+Esta versão resolve o erro:
+
+```txt
+Failed to launch the browser process: spawn /opt/render/.cache/puppeteer/chrome/linux-148.0.7778.97 EACCES
+```
+
+O bot agora localiza o executável real do Chrome dentro da pasta instalada pelo `@puppeteer/browsers`, aplica permissão `755` no binário e só então passa esse caminho para o WPPConnect/Puppeteer.

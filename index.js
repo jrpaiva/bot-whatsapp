@@ -264,27 +264,115 @@ const restoreSessionRemote = async () => {
     await iniciarBot();
 };
 
+function isExecutableFile(filePath) {
+    try {
+        const st = fs.statSync(filePath);
+        if (!st.isFile()) return false;
+        fs.chmodSync(filePath, 0o755);
+        fs.accessSync(filePath, fs.constants.X_OK);
+        return true;
+    } catch {
+        return false;
+    }
+}
+
+function findChromeExecutable(rootDir, maxDepth = 5) {
+    if (!rootDir || !fs.existsSync(rootDir)) return null;
+
+    const names = new Set(['chrome', 'chromium', 'chrome-headless-shell']);
+    const preferred = [];
+    const others = [];
+
+    function walk(dir, depth) {
+        if (depth > maxDepth) return;
+        let entries = [];
+        try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+
+        for (const entry of entries) {
+            const full = path.join(dir, entry.name);
+            if (entry.isDirectory()) {
+                if (!['node_modules', '.git'].includes(entry.name)) walk(full, depth + 1);
+                continue;
+            }
+            if (!entry.isFile() || !names.has(entry.name)) continue;
+            if (!isExecutableFile(full)) continue;
+            if (full.includes('chrome-linux') || full.includes('chromium')) preferred.push(full);
+            else others.push(full);
+        }
+    }
+
+    walk(rootDir, 0);
+    return preferred[0] || others[0] || null;
+}
+
 async function ensureChrome() {
     const cacheDir = process.env.PUPPETEER_CACHE_DIR || '/opt/render/.cache/puppeteer';
+    const buildId = process.env.PUPPETEER_CHROME_BUILD || '148.0.7778.97';
     mkdir(cacheDir);
+
+    const envChrome = process.env.PUPPETEER_EXECUTABLE_PATH;
+    if (envChrome) {
+        const resolvedEnvChrome = isExecutableFile(envChrome) ? envChrome : findChromeExecutable(envChrome, 4);
+        if (resolvedEnvChrome) {
+            log('Info', `Chrome: ${resolvedEnvChrome}`);
+            return resolvedEnvChrome;
+        }
+        log('Aviso', `PUPPETEER_EXECUTABLE_PATH inválido: ${envChrome}`);
+    }
+
+    let pb = null;
     try {
-        const pb = require('@puppeteer/browsers');
+        pb = require('@puppeteer/browsers');
         const installed = await pb.install({
-            browser: 'chrome', buildId: '148.0.7778.97',
-            cacheDir, unpack: true,
+            browser: pb.Browser?.CHROME || 'chrome',
+            buildId,
+            cacheDir,
+            unpack: true,
         });
-        log('Info', `Chrome: ${installed.path}`);
-        return installed.path;
+
+        const candidates = [];
+        if (typeof installed?.executablePath === 'function') candidates.push(installed.executablePath());
+        if (typeof installed?.executablePath === 'string') candidates.push(installed.executablePath);
+        if (typeof installed?.path === 'string') candidates.push(installed.path);
+
+        if (typeof pb.computeExecutablePath === 'function') {
+            try {
+                candidates.push(pb.computeExecutablePath({
+                    browser: pb.Browser?.CHROME || 'chrome',
+                    buildId,
+                    cacheDir,
+                }));
+            } catch {}
+        }
+
+        for (const candidate of candidates.filter(Boolean)) {
+            const resolved = isExecutableFile(candidate) ? candidate : findChromeExecutable(candidate, 4);
+            if (resolved) {
+                log('Info', `Chrome: ${resolved}`);
+                return resolved;
+            }
+        }
+
+        const found = findChromeExecutable(cacheDir, 6);
+        if (found) {
+            log('Info', `Chrome: ${found}`);
+            return found;
+        }
+
+        throw new Error(`Chrome instalado, mas executável não encontrado em ${cacheDir}`);
     } catch (e) {
         log('Info', `@puppeteer/browsers fallback: ${errMsg(e)}`);
     }
+
     try {
         const { execSync } = require('child_process');
-        execSync(`npx @puppeteer/browsers install chrome@148.0.7778.97 --path ${cacheDir}`, {
+        execSync(`npx @puppeteer/browsers install chrome@${buildId} --path ${cacheDir}`, {
             stdio: 'ignore', timeout: 180000,
         });
-        log('Info', 'Chrome instalado via npx');
-        return null;
+        const found = findChromeExecutable(cacheDir, 6);
+        if (!found) throw new Error(`Chrome instalado via npx, mas executável não encontrado em ${cacheDir}`);
+        log('Info', `Chrome: ${found}`);
+        return found;
     } catch (e2) {
         log('Erro', 'Falha Chrome', errMsg(e2));
         throw e2;

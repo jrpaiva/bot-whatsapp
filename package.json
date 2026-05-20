@@ -1,6 +1,6 @@
 {
   "name": "whatsapp-bot-lembretes",
-  "version": "3.1.0-render-512mb",
+  "version": "3.1.1-render-512mb-eacces-fix",
   "description": "Bot de lembretes para multiplos grupos",
   "main": "index.js",
   "scripts": {
