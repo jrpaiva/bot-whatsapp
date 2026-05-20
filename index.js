@@ -1099,9 +1099,8 @@ async function iniciarBot() {
             version,
             auth: state,
             browser: ['Chrome (Linux)', '', ''],
-            syncFullHistory: true,
-            markOnlineOnConnect: false,
-            generateHighQualityLink: false
+            syncFullHistory: false,
+            markOnlineOnConnect: false
         });
 
         clientInstance = sock;
@@ -1125,8 +1124,10 @@ async function iniciarBot() {
                     setBotState('ready', 'Conectado');
                     botConnected = true;
                     restarting = false;
+                    initialSyncDone = true;
                     invalidateGruposCache();
                     scheduleAll();
+                    listGroupsInternal().catch(() => {});
                 } else {
                     addLog('Aviso', 'Conexão aberta mas WhatsApp NÃO registrado. Limpando sessão parcial...');
                     qrCodeDataURL = null;
