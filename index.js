@@ -134,6 +134,9 @@ let logs = [];
 let restarting = false;
 let memoryWarningActive = false;
 
+// Flag: sync inicial concluído (messaging-history.set)
+let initialSyncDone = false;
+
 // Registro de callbacks de ACK por message ID — usado em enviarLembrete
 let pendingAcks = {};
 
@@ -317,7 +320,15 @@ async function listGroupsInternal() {
             }));
 
         grupos.sort((a, b) => a.nome.localeCompare(b.nome));
-        gruposCache = { list: grupos, at: Date.now(), building: false };
+
+        // Só cacheia se o sync inicial já tiver concluído OU se retornou grupos
+        if (initialSyncDone || grupos.length > 0) {
+            gruposCache = { list: grupos, at: Date.now(), building: false };
+        } else {
+            gruposCache = { list: null, at: 0, building: false };
+            addLog('Aviso', 'groupFetchAllParticipating() vazio — sync inicial ainda em andamento.');
+        }
+
         return grupos;
     } catch (e) {
         gruposCache.building = false;
@@ -1174,6 +1185,15 @@ async function iniciarBot() {
 
         sock.ev.on('group-participants.update', () => {
             invalidateGruposCache();
+        });
+
+        sock.ev.on('messaging-history.set', () => {
+            if (!initialSyncDone) {
+                initialSyncDone = true;
+                addLog('Bot', 'Sync inicial concluído. Atualizando grupos...');
+                invalidateGruposCache();
+                listGroupsInternal().catch(() => {});
+            }
         });
 
         addLog('Bot', 'Aguardando conexão ou QR Code...');
