@@ -137,6 +137,10 @@ let memoryWarningActive = false;
 // Flag: sync inicial concluído (messaging-history.set)
 let initialSyncDone = false;
 
+// Flag: autenticação completou (creds.registered === true ou isNewLogin)
+// Usada para distinguir "QR expirado" (code 515 sem auth) de "pairing OK + restart" (code 515 com auth)
+let authCompleted = false;
+
 // Registro de callbacks de ACK por message ID — usado em enviarLembrete
 let pendingAcks = {};
 
@@ -1122,6 +1126,8 @@ app.listen(PORT, () => {
 
 async function iniciarBot() {
     if (clientInstance) return;
+    authCompleted = false;
+    initialSyncDone = false;
     setBotState('connecting', 'Iniciando WhatsApp...');
     ensureDir(AUTH_DIR);
     addLog('Info', `Sessão: ${AUTH_DIR}`);
@@ -1142,7 +1148,12 @@ async function iniciarBot() {
         clientInstance = sock;
 
         sock.ev.on('connection.update', async (update) => {
-            const { connection, lastDisconnect, qr } = update;
+            const { connection, lastDisconnect, qr, isNewLogin } = update;
+
+            if (isNewLogin) {
+                authCompleted = true;
+                addLog('Bot', 'Pairing/Login detectado — credenciais atualizadas.');
+            }
 
             if (qr) {
                 addLog('QR', 'Novo QR Code gerado — acesse o painel para escanear.');
@@ -1180,11 +1191,14 @@ async function iniciarBot() {
                 const loggedOut = statusCode === DisconnectReason.loggedOut;
                 const restartRequired = statusCode === DisconnectReason.restartRequired;
                 const wasInQrState = botState === 'qr' || qrCodeDataURL !== null;
+                const pairingRealizado = authCompleted || sock.authState?.creds?.registered === true;
                 botConnected = false;
                 qrCodeDataURL = null;
 
-                if (loggedOut || (restartRequired && wasInQrState)) {
-                    const motivo = loggedOut ? 'logout' : 'QR expirado';
+                // code 515 + QR state SEM auth = QR expirou sem ninguém escanear
+                // code 515 + QR state COM auth = pairing foi feito, server pediu restart
+                if (loggedOut || (restartRequired && wasInQrState && !pairingRealizado)) {
+                    const motivo = loggedOut ? 'logout' : 'QR expirado (sem scan)';
                     addLog('Erro', `Sessão fechada (${motivo}). Limpando sessão local...`);
                     setBotState('disconnected', 'Sessão expirada');
                     clientInstance = null;
@@ -1194,20 +1208,25 @@ async function iniciarBot() {
                     addLog('Bot', 'Sessão local limpa. Iniciando bot para gerar QR...');
                     iniciarBot();
                 } else {
-                    addLog('Bot', `Desconectado (code=${statusCode}). Reconectando em 5s...`);
+                    addLog('Bot', `Desconectado (code=${statusCode}). Reconectando em 2s...`);
                     setBotState('connecting', 'Reconectando...');
                     clientInstance = null;
                     invalidateGruposCache();
                     if (!restarting) {
                         setTimeout(() => {
                             if (!clientInstance && !restarting) iniciarBot();
-                        }, 5000);
+                        }, 2000);
                     }
                 }
             }
         });
 
-        sock.ev.on('creds.update', saveCreds);
+        sock.ev.on('creds.update', (update) => {
+            saveCreds(update);
+            if (update.registered === true) {
+                authCompleted = true;
+            }
+        });
 
         sock.ev.on('messages.update', (updates) => {
             for (const { key, update } of updates) {
