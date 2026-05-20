@@ -36,3 +36,16 @@ services:
         value: 90000
       - key: SESSION_AUTOSAVE_MS
         value: 60000
+
+      - key: DEBUG_SEND
+        value: true
+      - key: SEND_TIMEOUT_MS
+        value: 45000
+      - key: SEND_RETRY_ATTEMPTS
+        value: 2
+      - key: SEND_RETRY_DELAY_MS
+        value: 2500
+      - key: RESET_ON_PERSISTENT_NO_SESSIONS
+        value: true
+      - key: DELETE_REMOTE_SESSION_ON_AUTH_ERROR
+        value: true

@@ -1,94 +1,51 @@
-# WA Bot Baileys — Render 512 MB
+# Bot WhatsApp Baileys — Render 512 MB
 
-Versão migrada de WPPConnect/Puppeteer para Baileys.
-
-## O que mudou
-
-- Removeu completamente Chromium, Puppeteer, WPPConnect e cache de Chrome.
-- Usa Baileys via WebSocket do WhatsApp Web.
-- Mantém painel web, QR Code, pareamento por código, envio manual, grupos, agendamentos, mensagens predefinidas, logs e MCP.
-- Usa menos RAM no Render porque não abre navegador.
-- Sessão fica em `BAILEYS_AUTH_DIR` e pode ser salva/restaurada pelo Supabase Storage.
-- Backup automático da sessão no Supabase a cada `SESSION_AUTOSAVE_MS`, quando configurado.
+Versão com correção para `No sessions | SessionError` em grupos e proteção contra backup de sessão inválido.
 
 ## Render
 
+Build Command:
+
 ```txt
-Build Command: npm install
-Start Command: npm start
+npm install
 ```
 
-Recomendo fazer deploy com:
+Start Command:
+
+```txt
+npm start
+```
+
+Depois de subir esta versão, faça deploy com cache limpo:
 
 ```txt
 Manual Deploy > Clear build cache & deploy
 ```
 
-## Variáveis recomendadas
+## Variáveis importantes
 
 ```env
 NODE_VERSION=20
 BAILEYS_AUTH_DIR=/tmp/baileys-auth
-PAIRING_WAIT_MS=90000
+DEBUG_SEND=true
+SEND_TIMEOUT_MS=45000
+SEND_RETRY_ATTEMPTS=2
+SEND_RETRY_DELAY_MS=2500
+RESET_ON_PERSISTENT_NO_SESSIONS=true
+DELETE_REMOTE_SESSION_ON_AUTH_ERROR=true
 SESSION_AUTOSAVE_MS=60000
-LOG_MAX_ENTRIES=180
-LOG_AUTO_CLEAR_HOURS=12
-MEMORY_WARN_MB=360
-MEMORY_RESTART_MB=470
-SUPABASE_URL=https://SEU-PROJETO.supabase.co
-SUPABASE_SERVICE_ROLE_KEY=SUA_SERVICE_ROLE_KEY
-SUPABASE_BUCKET=whatsapp-sessions
-SUPABASE_SESSION_PATH=baileys-auth.zip
-SUPABASE_CONFIG_PATH=bot_config.json
-SUPABASE_PREDEFINIDAS_PATH=predefinidas.json
-MCP_AUTH_TOKEN=troque-por-uma-chave-grande-e-secreta
 ```
 
-## Conectar por QR
+## O que esta versão corrige
 
-1. Abra o painel.
-2. Aguarde o QR aparecer.
-3. No WhatsApp: Aparelhos conectados > Conectar aparelho.
-4. Escaneie o QR.
-5. Depois de conectar, use o botão Sessão > Salvar Sessão se o Supabase estiver configurado.
+- Atualiza Baileys para `@whiskeysockets/baileys@6.7.19`.
+- Usa `makeCacheableSignalKeyStore` quando disponível.
+- Usa cache real de metadata de grupos.
+- Aplica patch defensivo pós-instalação para builds com bug de grupos LID.
+- Não salva backup automático quando a sessão está marcada como inválida.
+- Remove backup remoto do Supabase quando detectar logout/401.
+- Faz reset forte quando `No sessions` persistir depois das tentativas.
 
-## Conectar por código
+## Fluxo correto após instalar
 
-1. Clique em Emparelhar com código.
-2. Informe o número com país + DDD + número, sem `+`.
-3. Exemplo: `5598999999999`.
-4. No WhatsApp: Aparelhos conectados > Conectar aparelho > Conectar com número de telefone.
-5. Digite o código exibido no painel.
-
-## Endpoints
-
-```txt
-GET  /api/health
-GET  /api/status
-GET  /api/memory
-GET  /api/logs
-POST /api/logs/clear
-POST /api/session/restart
-POST /api/session/delete
-POST /api/session/save
-POST /api/session/restore
-POST /api/pairing-code
-GET  /api/grupos
-POST /api/enviar
-```
-
-
-## Correção v4.0.1
-
-- Fixado `@whiskeysockets/baileys` em `6.7.16` e importação robusta para CommonJS/ESM, evitando `makeWASocket is not a function`.
-
-
-## Correção v4.0.4
-
-- Adicionado `ws` e transporte explícito para Supabase no Node 20 do Render.
-- Corrige erro: `Node.js 20 detected without native WebSocket support`.
-
-
-## Debug de envio
-
-A versão 4.0.4 adiciona logs de envio: validação do grupo, tamanho da mensagem, retorno do `sendMessage`, timeout configurável por `SEND_TIMEOUT_MS` e eventos de ack/receipt quando `DEBUG_SEND=true`.
+Se já havia sessão quebrada, escaneie o QR novamente. A versão antiga restaurava sessão inválida do Supabase e entrava em loop de `401`; esta versão remove esse backup ruim quando detectar erro de autenticação.

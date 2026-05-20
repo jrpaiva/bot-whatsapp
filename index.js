@@ -9,6 +9,7 @@ const archiver = require('archiver');
 const unzipper = require('unzipper');
 const pino = require('pino');
 const WebSocket = require('ws');
+const crypto = require('crypto');
 const { createClient } = require('@supabase/supabase-js');
 
 // Supabase v2 precisa de WebSocket explícito no Node 20 usado pelo Render.
@@ -34,8 +35,10 @@ const SESSION_AUTOSAVE_MS = Number(process.env.SESSION_AUTOSAVE_MS || 60000);
 const MARK_ONLINE_ON_CONNECT = String(process.env.MARK_ONLINE_ON_CONNECT || 'false').toLowerCase() === 'true';
 const SEND_TIMEOUT_MS = Number(process.env.SEND_TIMEOUT_MS || 45000);
 const DEBUG_SEND = String(process.env.DEBUG_SEND || 'true').toLowerCase() !== 'false';
-// Tempo de aquecimento após conexão antes de liberar envios (Signal precisa sincronizar chaves)
-const CONNECT_WARMUP_MS = Number(process.env.CONNECT_WARMUP_MS || 8000);
+const SEND_RETRY_ATTEMPTS = Number(process.env.SEND_RETRY_ATTEMPTS || 2);
+const SEND_RETRY_DELAY_MS = Number(process.env.SEND_RETRY_DELAY_MS || 2500);
+const RESET_ON_PERSISTENT_NO_SESSIONS = String(process.env.RESET_ON_PERSISTENT_NO_SESSIONS || 'true').toLowerCase() !== 'false';
+const DELETE_REMOTE_SESSION_ON_AUTH_ERROR = String(process.env.DELETE_REMOTE_SESSION_ON_AUTH_ERROR || 'true').toLowerCase() !== 'false';
 
 const SUPABASE_URL = process.env.SUPABASE_URL || '';
 const SUPABASE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY || '';
@@ -83,11 +86,21 @@ const shortJson = obj => {
 };
 const msgKeyInfo = key => key ? `id=${key.id || ''} jid=${key.remoteJid || ''} fromMe=${key.fromMe === true}` : 'sem key';
 
+const isNoSessionErr = e => /no sessions|sessionerror|session error/i.test(errMsg(e) + ' ' + String(e?.stack || ''));
+const safeErrorDetails = e => ({
+    message: e?.message || String(e || ''),
+    name: e?.name || '',
+    code: e?.code || e?.status || e?.output?.statusCode || '',
+    stack: DEBUG_SEND ? String(e?.stack || '').split('\n').slice(0, 7).join('\n') : undefined
+});
+
 let baileys = null;
 let DisconnectReason = {};
 let makeWASocket = null;
 let useMultiFileAuthState = null;
 let fetchLatestBaileysVersion = null;
+let makeCacheableSignalKeyStore = null;
+let baileysPackageVersion = '';
 
 async function loadBaileys() {
     if (baileys) return baileys;
@@ -115,6 +128,13 @@ async function loadBaileys() {
 
     useMultiFileAuthState = firstFn(...roots.map(m => m.useMultiFileAuthState));
     fetchLatestBaileysVersion = firstFn(...roots.map(m => m.fetchLatestBaileysVersion));
+    makeCacheableSignalKeyStore = firstFn(...roots.map(m => m.makeCacheableSignalKeyStore));
+    try {
+        const pkg = require('@whiskeysockets/baileys/package.json');
+        baileysPackageVersion = pkg?.version || '';
+    } catch {
+        try { baileysPackageVersion = require('baileys/package.json')?.version || ''; } catch {}
+    }
     DisconnectReason = firstVal(...roots.map(m => m.DisconnectReason), {});
 
     if (!makeWASocket || !useMultiFileAuthState) {
@@ -140,7 +160,6 @@ let client = null;
 let scheduledJobs = {};
 let logs = [];
 let restarting = false;
-let botReady = false; // true somente após warmup pós-conexão (Signal keys sincronizadas)
 let memWarn = false;
 let reconnectTimer = null;
 let shuttingDown = false;
@@ -151,12 +170,21 @@ let lastPairingCode = '';
 let pairingWaiters = [];
 let authSaveTimer = null;
 let groupsCache = { list: null, at: 0, building: false };
+let groupsMetadataCache = {};
 let lastCredsUpdateAt = 0;
+let sessionUnhealthy = false;
+let hardResetScheduled = false;
 const CACHE_TTL = 2 * 60 * 1000;
 
 const getClient = () => (client && botConnected ? client : null);
-const invalCache = () => { groupsCache = { list: null, at: 0, building: false }; };
+const invalCache = (clearMetadata = false) => { groupsCache = { list: null, at: 0, building: false }; if (clearMetadata) groupsMetadataCache = {}; };
 const setState = (s, msg) => { botState = s; botStatus = msg; };
+const markSessionUnhealthy = reason => { sessionUnhealthy = true; log('Sessão', `Sessão marcada como inválida: ${reason}`); };
+async function deleteRemoteSessionQuiet(reason) {
+    if (!supabase || !DELETE_REMOTE_SESSION_ON_AUTH_ERROR) return;
+    try { await delSessionRemote(); log('Sessão', `Backup remoto removido (${reason}).`); }
+    catch (e) { log('Aviso', `Não removi backup remoto (${reason})`, errMsg(e)); }
+}
 
 const log = (type, msg, extra = null) => {
     const full = extra ? `${msg} — ${extra}` : msg;
@@ -296,6 +324,20 @@ const delSessionRemote = async () => {
     if (error) throw error;
 };
 const rmrf = async p => { if (fs.existsSync(p)) await fs.promises.rm(p, { recursive: true, force: true }); mkdir(p); };
+async function hardResetSession(reason = 'reset') {
+    if (hardResetScheduled) return;
+    hardResetScheduled = true;
+    markSessionUnhealthy(reason);
+    log('Sessão', `Reset forte iniciado: ${reason}`);
+    try { await pararBot(true); } catch {}
+    try { await rmrf(AUTH_DIR); } catch (e) { log('Aviso', 'Falha limpando sessão local', errMsg(e)); }
+    await deleteRemoteSessionQuiet(reason);
+    sessionUnhealthy = false;
+    hardResetScheduled = false;
+    qrDataURL = null; qrString = null; lastPairingCode = ''; pairingPhone = ''; pairingRequestedFor = '';
+    setState('qr', 'Sessão limpa. Escaneie o QR novamente.');
+    if (!shuttingDown) setTimeout(() => iniciarBot().catch(e => log('Erro', 'Reiniciar após reset', errMsg(e))), 500).unref?.();
+}
 const restoreSessionRemote = async () => {
     reqSup();
     restarting = true;
@@ -315,10 +357,11 @@ const restoreSessionRemote = async () => {
 };
 const scheduleSessionAutosave = () => {
     if (!supabase || SESSION_AUTOSAVE_MS <= 0) return;
+    if (sessionUnhealthy) { log('Aviso', 'Backup automático ignorado: sessão marcada como inválida.'); return; }
     if (authSaveTimer) return;
     authSaveTimer = setTimeout(async () => {
         authSaveTimer = null;
-        try { await saveSessionRemote(); log('Sessão', 'Backup automático salvo.'); }
+        try { if (sessionUnhealthy) { log('Aviso', 'Backup automático ignorado: sessão inválida.'); return; } await saveSessionRemote(); log('Sessão', 'Backup automático salvo.'); }
         catch (e) { log('Aviso', 'Backup automático falhou', errMsg(e)); }
     }, SESSION_AUTOSAVE_MS);
     authSaveTimer.unref?.();
@@ -409,36 +452,22 @@ async function iniciarBot() {
         mkdir(AUTH_DIR);
         await loadBaileys();
         log('Info', `Auth Baileys: ${AUTH_DIR}`);
-        const credsExist = fs.existsSync(path.join(AUTH_DIR, 'creds.json'));
-        if (credsExist) {
-            log('Info', 'Sessão existente detectada.');
-        } else if (supabase) {
-            // Sem sessão local — tenta restaurar do Supabase antes de iniciar socket
-            log('Sessão', 'Sem sessão local. Tentando restaurar do Supabase...');
-            try {
-                setState('restoring', 'Restaurando sessão do Supabase...');
-                const tmp = `/tmp/baileys_res_${Date.now()}.zip`;
-                const { data, error } = await supabase.storage.from(SUPABASE_BUCKET).download(SUPABASE_SESSION_PATH);
-                if (error) throw error;
-                await fs.promises.writeFile(tmp, Buffer.from(await data.arrayBuffer()));
-                await rmrf(AUTH_DIR);
-                await new Promise((res, rej) => { fs.createReadStream(tmp).pipe(unzipper.Extract({ path: AUTH_DIR })).on('close', res).on('error', rej); });
-                await fs.promises.rm(tmp, { force: true });
-                log('Sessão', 'Sessão restaurada do Supabase com sucesso.');
-            } catch (e) {
-                log('Aviso', 'Não foi possível restaurar sessão do Supabase', errMsg(e));
-            }
-        }
+        if (fs.existsSync(path.join(AUTH_DIR, 'creds.json'))) log('Info', 'Sessão existente detectada.');
         try {
             const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
             let version;
             try { version = fetchLatestBaileysVersion ? (await fetchLatestBaileysVersion()).version : undefined; }
             catch (e) { log('Aviso', 'Não foi possível buscar versão WA Web', errMsg(e)); }
 
+            const baileysLogger = pino({ level: process.env.BAILEYS_LOG_LEVEL || 'silent' });
+            const auth = makeCacheableSignalKeyStore
+                ? { creds: state.creds, keys: makeCacheableSignalKeyStore(state.keys, baileysLogger) }
+                : state;
+            if (baileysPackageVersion) log('Info', `Baileys versão: ${baileysPackageVersion}`);
             const sock = makeWASocket({
                 version,
-                auth: state,
-                logger: pino({ level: process.env.BAILEYS_LOG_LEVEL || 'silent' }),
+                auth,
+                logger: baileysLogger,
                 printQRInTerminal: false,
                 browser: ['WA Bot Render', 'Chrome', '1.0.0'],
                 markOnlineOnConnect: MARK_ONLINE_ON_CONNECT,
@@ -447,6 +476,7 @@ async function iniciarBot() {
                 connectTimeoutMs: 60000,
                 defaultQueryTimeoutMs: 60000,
                 keepAliveIntervalMs: 25000,
+                cachedGroupMetadata: async jid => groupsMetadataCache[jid] || undefined,
                 getMessage: async () => ({ conversation: '' }),
             });
             client = sock;
@@ -475,30 +505,21 @@ async function iniciarBot() {
                 }
                 if (connection === 'open') {
                     botConnected = true;
-                    botReady = false;
                     restarting = false;
                     qrDataURL = null;
                     qrString = null;
                     pairingPhone = '';
                     pairingRequestedFor = '';
                     lastPairingCode = '';
-                    setState('warming', `Conectado. Aguardando ${Math.round(CONNECT_WARMUP_MS / 1000)}s para sincronizar chaves...`);
+                    setState('ready', 'Conectado');
                     log('Sessão', isNewLogin ? 'Conectado com novo login.' : 'Conectado.');
                     invalCache();
                     scheduleAll();
                     scheduleSessionAutosave();
                     listGroups().catch(e => log('Aviso', 'Não foi possível carregar grupos', errMsg(e)));
-                    // Warmup: aguarda o Signal Protocol estabelecer sessões antes de liberar envios
-                    const warmupTimer = setTimeout(() => {
-                        botReady = true;
-                        setState('ready', 'Conectado');
-                        log('Sessão', `Pronto para enviar após warmup de ${Math.round(CONNECT_WARMUP_MS / 1000)}s.`);
-                    }, CONNECT_WARMUP_MS);
-                    warmupTimer.unref?.();
                 }
                 if (connection === 'close') {
                     botConnected = false;
-                    botReady = false;
                     const code = lastDisconnect?.error?.output?.statusCode || lastDisconnect?.error?.statusCode;
                     const loggedOut = code === DisconnectReason.loggedOut || code === 401;
                     const restartRequired = code === DisconnectReason.restartRequired;
@@ -508,7 +529,10 @@ async function iniciarBot() {
                     invalCache();
                     if (loggedOut) {
                         setState('logged_out', 'Sessão desconectada. Escaneie novamente.');
+                        markSessionUnhealthy(`logout ${reason}`);
                         try { await rmrf(AUTH_DIR); } catch {}
+                        await deleteRemoteSessionQuiet(`logout ${reason}`);
+                        sessionUnhealthy = false;
                         qrDataURL = null;
                         qrString = null;
                         pairingPhone = '';
@@ -599,6 +623,9 @@ async function listGroups() {
     try {
         if (!getClient() || typeof client.groupFetchAllParticipating !== 'function') { groupsCache.building = false; return []; }
         const data = await client.groupFetchAllParticipating();
+        for (const g of Object.values(data || {})) {
+            if (g?.id) groupsMetadataCache[g.id] = g;
+        }
         const gs = Object.values(data || {}).map(g => ({ nome: g.subject || g.name || 'Sem nome', id: g.id })).filter(g => g.id).sort((a, b) => a.nome.localeCompare(b.nome));
         groupsCache = { list: gs, at: Date.now(), building: false };
         if (!gs.length) log('Aviso', 'Nenhum grupo encontrado.');
@@ -610,10 +637,6 @@ async function enviarMsg(grupo, mensagem, meta = {}) {
     if (!client || !botConnected) {
         log('Erro', `Bot não conectado (${botStatus})`);
         return { ok: false, msg: `Bot não conectado. Estado: ${botStatus}` };
-    }
-    if (!botReady) {
-        log('Aviso', `Bot em warmup, aguarde (${botStatus})`);
-        return { ok: false, msg: `Bot ainda sincronizando chaves de sessão. Tente novamente em alguns segundos. Estado: ${botStatus}` };
     }
     try {
         const msg = sanitize(applyVars(mensagem, grupo));
@@ -645,19 +668,52 @@ async function enviarMsg(grupo, mensagem, meta = {}) {
         if (DEBUG_SEND && typeof client.groupMetadata === 'function') {
             try {
                 const md = await withTimeout(client.groupMetadata(destId), 15000, 'validar grupo');
+                if (md?.id) groupsMetadataCache[md.id] = md;
                 destNome = md?.subject || destNome;
-                log('Debug', `Grupo validado "${destNome}" participantes=${md?.participants?.length ?? '?'}`);
+                const parts = Array.isArray(md?.participants) ? md.participants : [];
+                const jidDomains = [...new Set(parts.map(p => String(p.id || '').split('@')[1] || '?'))].join(',') || '?';
+                log('Debug', `Grupo validado "${destNome}" participantes=${parts.length ?? '?'} dominios=${jidDomains}`);
             } catch (e) {
                 log('Aviso', `Não consegui validar metadata do grupo ${destId}`, errMsg(e));
             }
         }
 
-        log('WhatsApp', `Enviando para "${destNome}" (${destId}) — ${msg.length} caracteres`);
-        const sent = await withTimeout(client.sendMessage(destId, { text: msg }), SEND_TIMEOUT_MS, 'envio WhatsApp');
-        const id = sent?.key?.id || '';
-        log('Sucesso', `Enviado para "${destNome}" — ${msgKeyInfo(sent?.key)}`);
-        if (DEBUG_SEND) log('Debug', `Retorno sendMessage: ${shortJson(sent)}`);
-        return { ok: true, id, grupo: destNome, grupoId: destId, jid: destId, status: 'sent' };
+        let lastErr = null;
+        for (let attempt = 1; attempt <= Math.max(1, SEND_RETRY_ATTEMPTS + 1); attempt++) {
+            try {
+                log('WhatsApp', `Enviando para "${destNome}" (${destId}) — ${msg.length} caracteres — tentativa ${attempt}`);
+                const sent = await withTimeout(client.sendMessage(destId, { text: msg }), SEND_TIMEOUT_MS, 'envio WhatsApp');
+                const id = sent?.key?.id || '';
+                log('Sucesso', `Enviado para "${destNome}" — ${msgKeyInfo(sent?.key)}`);
+                if (DEBUG_SEND) log('Debug', `Retorno sendMessage: ${shortJson(sent)}`);
+                return { ok: true, id, grupo: destNome, grupoId: destId, jid: destId, status: 'sent', attempt };
+            } catch (e) {
+                lastErr = e;
+                log('Erro', `Falha envio tentativa ${attempt} para "${destNome}"`, errMsg(e));
+                if (DEBUG_SEND) log('Debug', `Erro detalhado envio: ${shortJson(safeErrorDetails(e))}`);
+
+                if (isNoSessionErr(e)) {
+                    log('Sessão', 'Baileys retornou No sessions. Renovando metadata/cache antes de tentar novamente.');
+                    invalCache();
+                    try {
+                        const md = await withTimeout(client.groupMetadata(destId), 20000, 'renovar metadata do grupo');
+                        if (md?.id) groupsMetadataCache[md.id] = md;
+                    } catch (mde) { log('Aviso', 'Renovar metadata falhou', errMsg(mde)); }
+                    try { await listGroups(); } catch (gle) { log('Aviso', 'Recarregar grupos falhou', errMsg(gle)); }
+                    if (attempt === SEND_RETRY_ATTEMPTS + 1) {
+                        log('Sessão', 'No sessions persistiu após retries. A sessão Signal está corrompida/incompleta.');
+                        if (RESET_ON_PERSISTENT_NO_SESSIONS) {
+                            setTimeout(() => hardResetSession('No sessions persistente').catch(e => log('Erro', 'Reset No sessions', errMsg(e))), 300).unref?.();
+                        } else {
+                            setTimeout(() => pararBot(true).then(() => iniciarBot()).catch(() => {}), 300).unref?.();
+                        }
+                    }
+                }
+
+                if (attempt <= SEND_RETRY_ATTEMPTS) await wait(SEND_RETRY_DELAY_MS * attempt);
+            }
+        }
+        throw lastErr || new Error('Falha desconhecida no envio');
     } catch (e) {
         log('Erro', `Falha envio para "${grupo || meta.grupoId || '?'}"`, errMsg(e));
         if (e?.stack && DEBUG_SEND) console.error(e.stack);
@@ -683,6 +739,26 @@ function scheduleAll() {
     });
 }
 
+const mcpSessions = new Map();
+const MCP_SESSION_TTL_MS = Number(process.env.MCP_SESSION_TTL_MS || 12 * 60 * 60 * 1000);
+const newMcpSession = () => {
+    const id = crypto.randomUUID ? crypto.randomUUID() : crypto.randomBytes(16).toString('hex');
+    mcpSessions.set(id, Date.now());
+    return id;
+};
+const touchMcpSession = id => {
+    if (!id) return false;
+    const at = mcpSessions.get(id);
+    if (!at) return false;
+    if (Date.now() - at > MCP_SESSION_TTL_MS) { mcpSessions.delete(id); return false; }
+    mcpSessions.set(id, Date.now());
+    return true;
+};
+setInterval(() => {
+    const now = Date.now();
+    for (const [id, at] of mcpSessions) if (now - at > MCP_SESSION_TTL_MS) mcpSessions.delete(id);
+}, 60 * 60 * 1000).unref?.();
+
 const mcpAuth = (req, res, next) => {
     if (!MCP_AUTH_TOKEN) return res.status(503).json({ ok: false, error: 'MCP_AUTH_TOKEN não configurado.' });
     const t = (req.headers.authorization || '').replace(/^Bearer\s+/i, '').trim();
@@ -691,7 +767,7 @@ const mcpAuth = (req, res, next) => {
 };
 const mcpR = (obj, isError = false) => ({ content: [{ type: 'text', text: JSON.stringify(obj, null, 2) }], isError });
 const mcpStatus = () => ({
-    connected: botConnected, ready: botReady, state: botState, status: botStatus, restarting, engine: 'baileys', timezone: BRASILIA_TZ,
+    connected: botConnected, state: botState, status: botStatus, restarting, engine: 'baileys', timezone: BRASILIA_TZ,
     uptimeSeconds: Math.floor(process.uptime()), startedAt: STARTED_AT.toISOString(),
     supabaseConfigured: Boolean(supabase), gruposCacheValido: Boolean(groupsCache.list), gruposCacheTotal: groupsCache.list?.length || 0,
     agendamentos: config.agendamentos.length, agendamentosAtivos: config.agendamentos.filter(a => a.ativo).length,
@@ -749,7 +825,7 @@ const handleMcp = async payload => {
     if (!payload || typeof payload !== 'object') return { jsonrpc: '2.0', id: null, error: { code: -32600, message: 'Inválido' } };
     const id = payload.id ?? null;
     try {
-        if (payload.method === 'initialize') return { jsonrpc: '2.0', id, result: { protocolVersion: payload.params?.protocolVersion || '2024-11-05', capabilities: { tools: {} }, serverInfo: { name: 'bot-whatsapp-mcp-baileys', version: '4.0.4' } } };
+        if (payload.method === 'initialize') return { jsonrpc: '2.0', id, result: { protocolVersion: payload.params?.protocolVersion || '2024-11-05', capabilities: { tools: {} }, serverInfo: { name: 'bot-whatsapp-mcp-baileys', version: '4.0.6' } } };
         if (payload.method === 'notifications/initialized') return null;
         if (payload.method === 'tools/list') return { jsonrpc: '2.0', id, result: { tools: mcpTools() } };
         if (payload.method === 'tools/call') { const r = await callMcp(payload.params.name, payload.params.arguments); return { jsonrpc: '2.0', id, result: mcpR(r) }; }
@@ -757,18 +833,57 @@ const handleMcp = async payload => {
     } catch (e) { return { jsonrpc: '2.0', id, result: mcpR({ ok: false, error: errMsg(e) }, true) }; }
 };
 
-app.get('/api/health', (req, res) => res.json({ ok: true, service: 'wa-bot-baileys', uptime: Math.floor(process.uptime()), state: botState, connected: botConnected, ready: botReady, engine: 'baileys', mcpConfigured: Boolean(MCP_AUTH_TOKEN) }));
+app.get('/api/health', (req, res) => res.json({ ok: true, service: 'wa-bot-baileys', uptime: Math.floor(process.uptime()), state: botState, connected: botConnected, engine: 'baileys', mcpConfigured: Boolean(MCP_AUTH_TOKEN) }));
 app.get('/health', (req, res) => res.redirect('/api/health'));
 app.get('/ping', (req, res) => res.send('pong'));
-app.get(MCP_ENDPOINT, mcpAuth, (req, res) => res.json({ ok: true, name: 'bot-whatsapp-mcp-baileys', tools: mcpTools().map(t => t.name) }));
+app.options(MCP_ENDPOINT, mcpAuth, (req, res) => {
+    res.setHeader('Mcp-Protocol-Version', '2024-11-05');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, Mcp-Session-Id, mcp-session-id');
+    res.setHeader('Access-Control-Allow-Methods', 'GET,POST,DELETE,OPTIONS');
+    res.status(204).end();
+});
+app.get(MCP_ENDPOINT, mcpAuth, (req, res) => {
+    const accept = String(req.headers.accept || '');
+    const sid = req.headers['mcp-session-id'] || req.headers['Mcp-Session-Id'] || newMcpSession();
+    if (!touchMcpSession(String(sid))) mcpSessions.set(String(sid), Date.now());
+    res.setHeader('Mcp-Session-Id', String(sid));
+    res.setHeader('Mcp-Protocol-Version', '2024-11-05');
+    if (accept.includes('text/event-stream')) {
+        res.writeHead(200, {
+            'Content-Type': 'text/event-stream',
+            'Cache-Control': 'no-cache, no-transform',
+            'Connection': 'keep-alive',
+            'Mcp-Session-Id': String(sid),
+            'Mcp-Protocol-Version': '2024-11-05'
+        });
+        res.write(`event: endpoint\ndata: ${JSON.stringify({ endpoint: MCP_ENDPOINT, sessionId: String(sid) })}\n\n`);
+        const keep = setInterval(() => res.write(': keepalive\n\n'), 25000);
+        req.on('close', () => clearInterval(keep));
+        return;
+    }
+    res.json({ ok: true, name: 'bot-whatsapp-mcp-baileys', sessionId: String(sid), sessions: mcpSessions.size, tools: mcpTools().map(t => t.name) });
+});
+app.delete(MCP_ENDPOINT, mcpAuth, (req, res) => {
+    const sid = String(req.headers['mcp-session-id'] || req.headers['Mcp-Session-Id'] || '');
+    if (sid) mcpSessions.delete(sid);
+    res.status(204).end();
+});
 app.post(MCP_ENDPOINT, mcpAuth, async (req, res) => {
     try {
+        let sid = String(req.headers['mcp-session-id'] || req.headers['Mcp-Session-Id'] || '');
+        const isInit = Array.isArray(req.body) ? req.body.some(x => x?.method === 'initialize') : req.body?.method === 'initialize';
+        if (!sid || !touchMcpSession(sid)) {
+            sid = newMcpSession();
+            if (!isInit) log('MCP', `Criada nova sessão MCP automaticamente para ${req.body?.method || 'batch'}`);
+        }
+        res.setHeader('Mcp-Session-Id', sid);
+        res.setHeader('Mcp-Protocol-Version', '2024-11-05');
         if (Array.isArray(req.body)) return res.json((await Promise.all(req.body.map(handleMcp))).filter(Boolean));
         const r = await handleMcp(req.body); if (!r) return res.status(202).end(); res.json(r);
     } catch (e) { res.status(500).json({ jsonrpc: '2.0', id: null, error: { code: -32000, message: errMsg(e) } }); }
 });
 app.get('/api/status', (req, res) => res.json({
-    connected: botConnected, ready: botReady, state: botState, status: botStatus, restarting, engine: 'baileys',
+    connected: botConnected, state: botState, status: botStatus, restarting, engine: 'baileys',
     qr: qrDataURL, qrRaw: qrString, pairingCode: lastPairingCode,
     supabaseConfigured: Boolean(supabase), supabaseBucket: SUPABASE_BUCKET, supabaseSessionPath: SUPABASE_SESSION_PATH,
     uptimeSeconds: Math.floor(process.uptime()), startedAt: STARTED_AT.toISOString(),
@@ -820,12 +935,13 @@ app.get('/api/grupos', async (req, res) => {
     if (!client || !botConnected) return res.json([]);
     try { res.json(await listGroups()); } catch (e) { log('Erro', 'Listar grupos', errMsg(e)); res.json([]); }
 });
-app.post('/api/session/save', async (req, res) => { try { await saveSessionRemote(); res.json({ ok: true }); } catch (e) { res.status(500).json({ ok: false, msg: errMsg(e) }); } });
+app.post('/api/session/save', async (req, res) => { try { if (sessionUnhealthy) return res.status(409).json({ ok: false, msg: 'Sessão marcada como inválida. Reconecte antes de salvar.' }); await saveSessionRemote(); res.json({ ok: true }); } catch (e) { res.status(500).json({ ok: false, msg: errMsg(e) }); } });
 app.post('/api/session/delete', async (req, res) => {
     try { if (supabase) await delSessionRemote().catch(() => {}); await rmrf(AUTH_DIR); res.json({ ok: true, msg: 'Sessão limpa' }); setTimeout(() => reiniciarBot(true).catch(() => {}), 300); }
     catch (e) { res.status(500).json({ ok: false, msg: errMsg(e) }); }
 });
 app.post('/api/session/restart', async (req, res) => { try { res.json({ ok: true, msg: 'Reiniciando...' }); setTimeout(() => reiniciarBot(true).catch(() => {}), 300); } catch (e) { res.status(500).json({ ok: false, msg: errMsg(e) }); } });
+app.post('/api/session/hard-reset', async (req, res) => { try { res.json({ ok: true, msg: 'Reset forte iniciado. Escaneie o QR novamente.' }); setTimeout(() => hardResetSession('manual').catch(e => log('Erro', 'Hard reset', errMsg(e))), 300); } catch (e) { res.status(500).json({ ok: false, msg: errMsg(e) }); } });
 app.post('/api/session/restore', async (req, res) => {
     try { res.json({ ok: true, msg: 'Restaurando...' }); setTimeout(() => restoreSessionRemote().catch(e => { log('Erro', 'Restore', errMsg(e)); setState('error', 'Erro restore'); restarting = false; }), 500); }
     catch (e) { res.status(500).json({ ok: false, msg: errMsg(e) }); }
