@@ -1069,89 +1069,92 @@ async function iniciarBot() {
     ensureDir(AUTH_DIR);
     addLog('Info', `Sessão: ${AUTH_DIR}`);
 
-    const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
-    const { version } = await fetchLatestBaileysVersion();
-    addLog('Info', `Baileys v${version.join('.')}`);
+    try {
+        const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
+        const { version } = await fetchLatestBaileysVersion();
+        addLog('Info', `Baileys v${version.join('.')}`);
 
-    const sock = makeWASocket({
-        version,
-        auth: state,
-        printQRInTerminal: true,
-        browser: ['Chrome (Linux)', '', ''],
-        syncFullHistory: false,
-        markOnlineOnConnect: false,
-        generateHighQualityLink: false
-    });
+        const sock = makeWASocket({
+            version,
+            auth: state,
+            browser: ['Chrome (Linux)', '', ''],
+            syncFullHistory: true,
+            markOnlineOnConnect: false,
+            generateHighQualityLink: false
+        });
 
-    clientInstance = sock;
+        clientInstance = sock;
 
-    sock.ev.on('connection.update', async (update) => {
-        const { connection, lastDisconnect, qr } = update;
+        sock.ev.on('connection.update', async (update) => {
+            const { connection, lastDisconnect, qr } = update;
 
-        if (qr) {
-            addLog('QR', 'Novo QR Code gerado — acesse o painel para escanear.');
-            qrCodeDataURL = await qrcode.toDataURL(qr);
-            setBotState('qr', 'Aguardando escaneamento...');
-            botConnected = false;
-            restarting = false;
-        }
+            if (qr) {
+                addLog('QR', 'Novo QR Code gerado — acesse o painel para escanear.');
+                qrCodeDataURL = await qrcode.toDataURL(qr);
+                setBotState('qr', 'Aguardando escaneamento...');
+                botConnected = false;
+                restarting = false;
+            }
 
-        if (connection === 'open') {
-            addLog('Bot', 'Conectado com sucesso!');
-            qrCodeDataURL = null;
-            setBotState('ready', 'Conectado');
-            botConnected = true;
-            restarting = false;
-            invalidateGruposCache();
-            scheduleAll();
-        }
-
-        if (connection === 'close') {
-            const statusCode = lastDisconnect?.error?.output?.statusCode;
-            const loggedOut = statusCode === DisconnectReason.loggedOut;
-            botConnected = false;
-            qrCodeDataURL = null;
-
-            if (loggedOut) {
-                addLog('Erro', 'Sessão expirada/logout. Escaneie o QR novamente.');
-                setBotState('disconnected', 'Sessão expirada');
-                clientInstance = null;
+            if (connection === 'open') {
+                addLog('Bot', 'Conectado com sucesso!');
+                qrCodeDataURL = null;
+                setBotState('ready', 'Conectado');
+                botConnected = true;
                 restarting = false;
                 invalidateGruposCache();
-            } else {
-                addLog('Bot', `Desconectado (code=${statusCode}). Reconectando em 5s...`);
-                setBotState('connecting', 'Reconectando...');
-                clientInstance = null;
-                invalidateGruposCache();
-                if (!restarting) {
-                    setTimeout(() => {
-                        if (!clientInstance && !restarting) iniciarBot();
-                    }, 5000);
+                scheduleAll();
+            }
+
+            if (connection === 'close') {
+                const statusCode = lastDisconnect?.error?.output?.statusCode;
+                const loggedOut = statusCode === DisconnectReason.loggedOut;
+                botConnected = false;
+                qrCodeDataURL = null;
+
+                if (loggedOut) {
+                    addLog('Erro', 'Sessão expirada/logout. Escaneie o QR novamente.');
+                    setBotState('disconnected', 'Sessão expirada');
+                    clientInstance = null;
+                    restarting = false;
+                    invalidateGruposCache();
+                } else {
+                    addLog('Bot', `Desconectado (code=${statusCode}). Reconectando em 5s...`);
+                    setBotState('connecting', 'Reconectando...');
+                    clientInstance = null;
+                    invalidateGruposCache();
+                    if (!restarting) {
+                        setTimeout(() => {
+                            if (!clientInstance && !restarting) iniciarBot();
+                        }, 5000);
+                    }
                 }
             }
-        }
-    });
+        });
 
-    sock.ev.on('creds.update', saveCreds);
+        sock.ev.on('creds.update', saveCreds);
 
-    // ACK tracking: dispatch para pendingAcks registrados em enviarLembrete
-    sock.ev.on('messages.update', (updates) => {
-        for (const { key, update } of updates) {
-            if (!key.fromMe) continue;
-            const id = key.id;
-            const cb = pendingAcks[id];
-            if (cb && update.status !== undefined) {
-                cb(update.status);
+        sock.ev.on('messages.update', (updates) => {
+            for (const { key, update } of updates) {
+                if (!key.fromMe) continue;
+                const id = key.id;
+                const cb = pendingAcks[id];
+                if (cb && update.status !== undefined) {
+                    cb(update.status);
+                }
             }
-        }
-    });
+        });
 
-    // Invalida cache de grupos quando o bot entra/sai de grupos
-    sock.ev.on('group-participants.update', () => {
-        invalidateGruposCache();
-    });
+        sock.ev.on('group-participants.update', () => {
+            invalidateGruposCache();
+        });
 
-    addLog('Bot', 'Aguardando conexão ou QR Code...');
+        addLog('Bot', 'Aguardando conexão ou QR Code...');
+    } catch (e) {
+        addLog('Erro', 'Falha ao iniciar bot', getErrorDetails(e));
+        clientInstance = null;
+        restarting = false;
+    }
 }
 
 async function bootstrap() {
