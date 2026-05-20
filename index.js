@@ -1,7 +1,6 @@
-const { Client, LocalAuth } = require('whatsapp-web.js');
+const { makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion } = require('@whiskeysockets/baileys');
 const cron = require('node-cron');
 const qrcode = require('qrcode');
-const chromium = require('@sparticuz/chromium');
 const express = require('express');
 const fs = require('fs');
 const path = require('path');
@@ -133,8 +132,10 @@ let clientInstance = null;
 let scheduledJobs = {};
 let logs = [];
 let restarting = false;
-let lastLoadingLog = { bucket: null, at: 0 };
 let memoryWarningActive = false;
+
+// Registro de callbacks de ACK por message ID — usado em enviarLembrete
+let pendingAcks = {};
 
 // ── FIX #1: Cache de grupos para evitar getChats() concorrentes e erros de timing
 // O cache é invalidado ao reconectar ou após GRUPOS_CACHE_TTL_MS
@@ -276,25 +277,21 @@ async function waitUntilReady(timeoutMs = READY_WAIT_MS) {
     const started = Date.now();
     while (Date.now() - started < timeoutMs) {
         if (botConnected && clientInstance) return true;
-        if (!clientInstance || ['qr', 'error', 'auth_failure', 'disconnected'].includes(botState)) return false;
+        if (!clientInstance || ['qr', 'error', 'disconnected'].includes(botState)) return false;
         await wait(1000);
     }
     return botConnected && !!clientInstance;
 }
 
-// ── FIX #3: listGroups com cache + guard contra race condition ─────────────
-// Problema original: getChats() era chamado concorrentemente (poll do painel + MCP + enviarLembrete)
-// enquanto o client estava sendo reiniciado → "Requesting main frame too early" e "Target closed"
+// ── listGroups com cache + guard contra race condition ────────────────────
 async function listGroupsInternal() {
     const client = getClient();
     if (!client) return [];
 
-    // Retorna cache se ainda válido
     if (gruposCache.list && (Date.now() - gruposCache.at) < GRUPOS_CACHE_TTL_MS) {
         return gruposCache.list;
     }
 
-    // Se já está construindo, aguarda até 8s
     if (gruposCache.building) {
         const deadline = Date.now() + 8000;
         while (gruposCache.building && Date.now() < deadline) await wait(200);
@@ -304,33 +301,20 @@ async function listGroupsInternal() {
 
     gruposCache.building = true;
     try {
-        // Double-check: client ainda válido após aguardar lock
         if (!getClient()) { gruposCache.building = false; return []; }
 
-        const chats = await clientInstance.getChats();
-        const botNumber = String(clientInstance.info?.wid?._serialized || '').replace(/\D/g, '');
-        const grupos = [];
+        const groupsMap = await clientInstance.groupFetchAllParticipating();
+        const botJid = clientInstance.user?.id?.split(':')[0] || '';
 
-        for (const chat of chats) {
-            if (!chat.isGroup) continue;
-            const groupId = chat.id?._serialized || '';
-            const nome = chat.name || '';
-
-            // Guard contra client destruído durante iteração
-            if (!getClient()) break;
-
-            try {
-                const fullChat = await clientInstance.getChatById(groupId);
-                const participants = Array.isArray(fullChat.participants) ? fullChat.participants : [];
-                const participa = Boolean(botNumber) && participants.some(p =>
-                    String(p?.id?._serialized || p?.id?.user || p?.id || '').replace(/\D/g, '') === botNumber
-                );
-                if (!participa || fullChat.isReadOnly === true) continue;
-                grupos.push({ nome, id: groupId });
-            } catch (e) {
-                // Ignora erros individuais de grupo — não loga para evitar spam
-            }
-        }
+        const grupos = Object.entries(groupsMap)
+            .filter(([jid, meta]) => {
+                if (!botJid) return true;
+                return meta.participants?.some(p => p.id === botJid);
+            })
+            .map(([jid, meta]) => ({
+                nome: meta.subject || 'Sem nome',
+                id: jid
+            }));
 
         grupos.sort((a, b) => a.nome.localeCompare(b.nome));
         gruposCache = { list: grupos, at: Date.now(), building: false };
@@ -341,14 +325,11 @@ async function listGroupsInternal() {
     }
 }
 
-// ── ENVIAR ─────────────────────────────────────────────────────────────────
-
 async function enviarLembrete(grupo, mensagem, meta = {}) {
     const grupoId = meta.grupoId || '';
 
-    // FIX #4: Checar botConnected E clientInstance antes de qualquer operação
     if (!clientInstance || !botConnected) {
-        if (clientInstance && ['starting', 'connecting', 'authenticated', 'restoring'].includes(botState)) {
+        if (clientInstance && ['connecting', 'authenticated', 'restoring'].includes(botState)) {
             addLog('Info', `Bot ainda não pronto. Aguardando até ${Math.round(READY_WAIT_MS / 1000)}s...`);
             const ready = await waitUntilReady();
             if (!ready) {
@@ -367,40 +348,32 @@ async function enviarLembrete(grupo, mensagem, meta = {}) {
 
         addLog('WhatsApp', `Tentando enviar para "${grupo}"${grupoId ? ` id="${grupoId}"` : ''}`);
 
-        // 1. Resolve destino
         let destinoId = grupoId || null;
         let destinoNome = grupo;
 
         if (!destinoId) {
             if (!getClient()) return { ok: false, msg: 'Bot desconectou durante resolução do grupo.' };
-            const chats = await clientInstance.getChats();
-            const matches = chats.filter(c => c.isGroup && c.name === grupo);
+            const groupsMap = await clientInstance.groupFetchAllParticipating();
+            const entries = Object.entries(groupsMap);
+            const matches = entries.filter(([jid, meta]) => meta.subject === grupo);
             if (matches.length > 1) addLog('Aviso', `${matches.length} grupos com nome "${grupo}". Salve o ID correto.`);
             if (!matches[0]) { addLog('Aviso', `Grupo "${grupo}" não encontrado.`); return { ok: false, msg: `Grupo "${grupo}" não encontrado.` }; }
-            destinoId = matches[0].id._serialized;
-            destinoNome = matches[0].name;
+            destinoId = matches[0][0];
+            destinoNome = matches[0][1].subject;
         }
 
-        // 2. Valida participação
         if (!getClient()) return { ok: false, msg: 'Bot desconectou antes de validar o grupo.' };
         try {
-            const chatObj = await clientInstance.getChatById(destinoId);
-            const botNumber = String(clientInstance.info?.wid?._serialized || '').replace(/\D/g, '');
-
-            if (chatObj && Array.isArray(chatObj.participants) && botNumber) {
-                const participa = chatObj.participants.some(p =>
-                    String(p?.id?._serialized || p?.id?.user || p?.id || '').replace(/\D/g, '') === botNumber
-                );
+            const meta = await clientInstance.groupMetadata(destinoId);
+            const botJid = clientInstance.user?.id?.split(':')[0] || '';
+            if (botJid && meta.participants?.length) {
+                const participa = meta.participants.some(p => p.id === botJid);
                 if (!participa) {
                     addLog('Erro', `Bot NÃO está mais no grupo "${destinoNome}" (${destinoId}). Corrija o agendamento.`);
                     return { ok: false, msg: `Bot foi removido do grupo "${destinoNome}". Corrija o agendamento.` };
                 }
             }
-            if (chatObj?.isReadOnly === true) {
-                addLog('Erro', `Grupo "${destinoNome}" está somente leitura.`);
-                return { ok: false, msg: `Grupo "${destinoNome}" está somente leitura.` };
-            }
-            destinoNome = chatObj?.name || destinoNome;
+            destinoNome = meta.subject || destinoNome;
         } catch (validErr) {
             addLog('Aviso', `Não foi possível validar grupo "${destinoNome}": ${getErrorDetails(validErr)}. Abortando.`);
             return { ok: false, msg: `Grupo "${destinoNome}" parece inválido: ${getErrorDetails(validErr)}` };
@@ -408,56 +381,49 @@ async function enviarLembrete(grupo, mensagem, meta = {}) {
 
         addLog('WhatsApp', `Destino validado: "${destinoNome}" (${destinoId})`);
 
-        // 3. Envia e rastreia ACK
         if (!getClient()) return { ok: false, msg: 'Bot desconectou antes de enviar.' };
 
-        return await new Promise(async (resolve) => {
-            let resolved = false;
-            let ackTimeout = null;
-            let sentMsgId = null;
+        try {
+            const sentMsg = await clientInstance.sendMessage(destinoId, { text: mensagemFinal });
+            const msgId = sentMsg?.key?.id || null;
 
-            function finish(result) {
-                if (resolved) return;
-                resolved = true;
-                if (ackTimeout) clearTimeout(ackTimeout);
-                try { if (clientInstance) clientInstance.removeListener('message_ack', onAck); } catch (_) {}
-                resolve(result);
+            if (!msgId) {
+                addLog('Sucesso', `Enviado para "${destinoNome}" (sem ID para rastrear ACK).`);
+                return { ok: true, grupo: destinoNome, grupoId: destinoId };
             }
 
-            function onAck(msg, ack) {
-                const mid = msg?.id?._serialized || msg?.id?.id || '';
-                if (!sentMsgId || mid !== sentMsgId) return;
-                const labels = { '-1': 'ERRO', '0': 'pendente', '1': 'enviado', '2': 'entregue', '3': 'lida', '4': 'reproduzida' };
-                addLog('ACK', `${mid}: ${labels[String(ack)] || ack}`);
-                if (ack === -1) {
-                    addLog('Erro', `ACK negativo para "${destinoNome}". Mensagem rejeitada pelo WhatsApp.`);
-                    finish({ ok: false, msg: `ACK negativo: mensagem rejeitada para "${destinoNome}".` });
-                } else if (ack >= 1) {
-                    addLog('Sucesso', `Confirmado para "${destinoNome}". ID=${mid}`);
-                    finish({ ok: true, id: mid, grupo: destinoNome, grupoId: destinoId });
-                }
-            }
+            return await new Promise((resolve) => {
+                let resolved = false;
+                const timeout = setTimeout(() => {
+                    if (resolved) return;
+                    resolved = true;
+                    delete pendingAcks[msgId];
+                    addLog('Aviso', `ACK não chegou em 15s para "${destinoNome}". Considerando enviado.`);
+                    resolve({ ok: true, grupo: destinoNome, grupoId: destinoId });
+                }, 15000);
 
-            try { if (clientInstance) clientInstance.on('message_ack', onAck); } catch (_) {}
+                pendingAcks[msgId] = (status) => {
+                    if (resolved) return;
+                    resolved = true;
+                    clearTimeout(timeout);
+                    delete pendingAcks[msgId];
 
-            ackTimeout = setTimeout(() => {
-                addLog('Aviso', `ACK não chegou em 15s para "${destinoNome}". Considerando enviado.`);
-                finish({ ok: true, grupo: destinoNome, grupoId: destinoId });
-            }, 15000);
+                    const labels = { '0': 'ERRO', '1': 'enviado', '2': 'entregue', '3': 'lida', '4': 'reproduzida' };
+                    addLog('ACK', `${msgId}: ${labels[String(status)] || status}`);
 
-            try {
-                if (!getClient()) { finish({ ok: false, msg: 'Bot desconectou durante envio.' }); return; }
-                const sentMsg = await clientInstance.sendMessage(destinoId, mensagemFinal);
-                sentMsgId = sentMsg?.id?._serialized || sentMsg?.id?.id || null;
-                if (!sentMsgId) {
-                    addLog('Sucesso', `Enviado para "${destinoNome}" (sem ID para rastrear ACK).`);
-                    finish({ ok: true, grupo: destinoNome, grupoId: destinoId });
-                }
-            } catch (sendErr) {
-                addLog('Erro', `sendMessage falhou: "${destinoNome}"`, getErrorDetails(sendErr));
-                finish({ ok: false, msg: getErrorDetails(sendErr) });
-            }
-        });
+                    if (status === 0) {
+                        addLog('Erro', `ACK negativo para "${destinoNome}". Mensagem rejeitada pelo WhatsApp.`);
+                        resolve({ ok: false, msg: `ACK negativo: mensagem rejeitada para "${destinoNome}".` });
+                    } else {
+                        addLog('Sucesso', `Confirmado para "${destinoNome}". ID=${msgId}`);
+                        resolve({ ok: true, id: msgId, grupo: destinoNome, grupoId: destinoId });
+                    }
+                };
+            });
+        } catch (sendErr) {
+            addLog('Erro', `sendMessage falhou: "${destinoNome}"`, getErrorDetails(sendErr));
+            return { ok: false, msg: getErrorDetails(sendErr) };
+        }
 
     } catch (e) {
         addLog('Erro', 'Falha geral ao enviar', getErrorDetails(e));
@@ -615,26 +581,27 @@ async function restoreSessionFromSupabase() {
     await iniciarBot();
 }
 
-// ── FIX #5: stopBot aguarda destruição completa antes de liberar ───────────
+// ── stopBot: encerra conexão Baileys ──────────────────────────────────────
 async function stopBot(keepRestarting = false) {
     restarting = true;
     setBotState('restarting', 'Reiniciando...');
     Object.values(scheduledJobs).forEach(j => j.stop());
     scheduledJobs = {};
     invalidateGruposCache();
+    pendingAcks = {};
 
     const localClient = clientInstance;
-    clientInstance = null;   // nullifica ANTES de destroy para guards funcionarem
+    clientInstance = null;
     botConnected = false;
     qrCodeDataURL = null;
 
     if (localClient) {
         try {
+            localClient.end(undefined);
             await Promise.race([
-                localClient.destroy(),
-                wait(8000)   // timeout de segurança — não trava indefinidamente
+                wait(5000)
             ]);
-        } catch (e) { addLog('Aviso', 'Erro ao destruir client', getErrorDetails(e)); }
+        } catch (e) { addLog('Aviso', 'Erro ao encerrar client', getErrorDetails(e)); }
     }
 
     if (!keepRestarting) restarting = false;
@@ -1100,84 +1067,90 @@ async function iniciarBot() {
     if (clientInstance) return;
     setBotState('connecting', 'Iniciando WhatsApp...');
     ensureDir(AUTH_DIR);
-    const execPath = await chromium.executablePath();
-    addLog('Info', `Chrome: ${execPath}`);
     addLog('Info', `Sessão: ${AUTH_DIR}`);
 
-    clientInstance = new Client({
-        authStrategy: new LocalAuth({ dataPath: AUTH_DIR }),
-        puppeteer: {
-            executablePath: execPath,
-            args: [...chromium.args, '--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu', '--single-process'],
-            headless: true
+    const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
+    const { version } = await fetchLatestBaileysVersion();
+    addLog('Info', `Baileys v${version.join('.')}`);
+
+    const sock = makeWASocket({
+        version,
+        auth: state,
+        printQRInTerminal: true,
+        browser: ['Chrome (Linux)', '', ''],
+        syncFullHistory: false,
+        markOnlineOnConnect: false,
+        generateHighQualityLink: false
+    });
+
+    clientInstance = sock;
+
+    sock.ev.on('connection.update', async (update) => {
+        const { connection, lastDisconnect, qr } = update;
+
+        if (qr) {
+            addLog('QR', 'Novo QR Code gerado — acesse o painel para escanear.');
+            qrCodeDataURL = await qrcode.toDataURL(qr);
+            setBotState('qr', 'Aguardando escaneamento...');
+            botConnected = false;
+            restarting = false;
+        }
+
+        if (connection === 'open') {
+            addLog('Bot', 'Conectado com sucesso!');
+            qrCodeDataURL = null;
+            setBotState('ready', 'Conectado');
+            botConnected = true;
+            restarting = false;
+            invalidateGruposCache();
+            scheduleAll();
+        }
+
+        if (connection === 'close') {
+            const statusCode = lastDisconnect?.error?.output?.statusCode;
+            const loggedOut = statusCode === DisconnectReason.loggedOut;
+            botConnected = false;
+            qrCodeDataURL = null;
+
+            if (loggedOut) {
+                addLog('Erro', 'Sessão expirada/logout. Escaneie o QR novamente.');
+                setBotState('disconnected', 'Sessão expirada');
+                clientInstance = null;
+                restarting = false;
+                invalidateGruposCache();
+            } else {
+                addLog('Bot', `Desconectado (code=${statusCode}). Reconectando em 5s...`);
+                setBotState('connecting', 'Reconectando...');
+                invalidateGruposCache();
+                if (!restarting) {
+                    setTimeout(() => {
+                        if (!clientInstance && !restarting) iniciarBot();
+                    }, 5000);
+                }
+            }
         }
     });
 
-    clientInstance.on('loading_screen', (percent) => {
-        const p = Number(percent || 0);
-        setBotState('connecting', `Carregando WhatsApp ${p}%...`);
-        const bucket = p >= 99 ? 99 : p >= 95 ? 95 : Math.floor(p / 25) * 25;
-        const now = Date.now();
-        if (bucket !== lastLoadingLog.bucket || now - lastLoadingLog.at > 60000) {
-            lastLoadingLog = { bucket, at: now };
-            addLog('WhatsApp', `Carregando ${p}%`);
+    sock.ev.on('creds.update', saveCreds);
+
+    // ACK tracking: dispatch para pendingAcks registrados em enviarLembrete
+    sock.ev.on('messages.update', (updates) => {
+        for (const { key, update } of updates) {
+            if (!key.fromMe) continue;
+            const id = key.id;
+            const cb = pendingAcks[id];
+            if (cb && update.status !== undefined) {
+                cb(update.status);
+            }
         }
     });
 
-    clientInstance.on('authenticated', () => {
-        qrCodeDataURL = null;
-        setBotState('authenticated', 'Sessão autenticada. Finalizando conexão...');
-        addLog('Bot', 'Sessão autenticada. Aguardando ready...');
-    });
-
-    clientInstance.on('qr', async (qr) => {
-        addLog('QR', 'Novo QR Code gerado — acesse o painel para escanear.');
-        qrCodeDataURL = await qrcode.toDataURL(qr);
-        setBotState('qr', 'Aguardando escaneamento...');
-        botConnected = false;
-        restarting = false;
-    });
-
-    clientInstance.on('ready', () => {
-        addLog('Bot', 'Conectado com sucesso!');
-        qrCodeDataURL = null;
-        setBotState('ready', 'Conectado');
-        botConnected = true;
-        restarting = false;
-        invalidateGruposCache(); // limpa cache antigo ao reconectar
-        scheduleAll();
-    });
-
-    clientInstance.on('message_ack', () => {});
-
-    clientInstance.on('auth_failure', (msg) => {
-        addLog('Erro', `Falha de autenticação: ${msg}`);
-        setBotState('auth_failure', 'Erro de autenticação');
-        botConnected = false;
-        restarting = false;
+    // Invalida cache de grupos quando o bot entra/sai de grupos
+    sock.ev.on('group-participants.update', () => {
         invalidateGruposCache();
     });
 
-    clientInstance.on('disconnected', (reason) => {
-        addLog('Bot', `Desconectado: ${reason}`);
-        setBotState('disconnected', 'Desconectado');
-        botConnected = false;
-        restarting = false;
-        qrCodeDataURL = null;
-        clientInstance = null;
-        invalidateGruposCache();
-        if (!restarting) setTimeout(() => iniciarBot(), 5000);
-    });
-
-    clientInstance.initialize().catch((e) => {
-        addLog('Erro', 'Erro ao inicializar WhatsApp', getErrorDetails(e));
-        setBotState('error', 'Erro ao inicializar WhatsApp');
-        botConnected = false;
-        restarting = false;
-        clientInstance = null;
-        invalidateGruposCache();
-        if (!restarting) setTimeout(() => iniciarBot(), 8000);
-    });
+    addLog('Bot', 'Aguardando conexão ou QR Code...');
 }
 
 async function bootstrap() {

@@ -9,7 +9,7 @@ services:
       - key: WWEBJS_AUTH_DIR
         value: /tmp/.wwebjs_auth
       - key: WWEBJS_READY_WAIT_MS
-        value: 45000
+        value: 30000
       - key: SUPABASE_URL
         sync: false
       - key: SUPABASE_SERVICE_ROLE_KEY
