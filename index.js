@@ -698,7 +698,12 @@ function getMcpTools() {
         mcpTool('salvar_sessao', 'Salva a sessão atual do WhatsApp no Supabase.', { type: 'object', properties: {}, additionalProperties: false }),
         mcpTool('restaurar_sessao', 'Inicia a restauração da sessão do WhatsApp a partir do Supabase.', { type: 'object', properties: {}, additionalProperties: false }),
         mcpTool('excluir_sessao', 'Exclui o backup da sessão do WhatsApp no Supabase.', { type: 'object', properties: {}, additionalProperties: false }),
-        mcpTool('atualizar_sessao_e_grupos', 'Reinicia o client do WhatsApp sem apagar a sessão, forçando nova leitura dos grupos.', { type: 'object', properties: {}, additionalProperties: false })
+        mcpTool('atualizar_sessao_e_grupos', 'Reinicia o client do WhatsApp sem apagar a sessão, forçando nova leitura dos grupos.', { type: 'object', properties: {}, additionalProperties: false }),
+        mcpTool('gerar_codigo_emparelhamento', 'Gera um código de emparelhamento (pairing code) de 8 dígitos para conectar no WhatsApp. Mais confiável que QR Code.', {
+            type: 'object', properties: {
+                telefone: { type: 'string', description: 'Número com código do país. Ex: 5511999999999' }
+            }, required: ['telefone'], additionalProperties: false
+        })
     ];
 }
 
@@ -865,6 +870,17 @@ async function callMcpTool(name, args = {}) {
                 catch (e) { addLog('Erro', 'Erro ao reiniciar via MCP', getErrorDetails(e)); setBotState('error', 'Erro ao reiniciar via MCP'); restarting = false; }
             }, 300);
             return { ok: true, msg: 'Reinício iniciado. Consulte listar_status_bot/listar_logs.' };
+
+        case 'gerar_codigo_emparelhamento': {
+            const phone = String(args.telefone || '').replace(/\D/g, '');
+            if (!phone || phone.length < 10 || phone.length > 15) throw new Error('Número inválido. Use formato: 5511999999999');
+            if (!clientInstance || typeof clientInstance.requestPairingCode !== 'function') throw new Error('Bot não está em estado de emparelhamento ou Baileys não suporta.');
+            addLog('Pairing', `Solicitando código via MCP para ${phone}...`);
+            const code = await clientInstance.requestPairingCode(phone);
+            const formatted = String(code).match(/.{1,4}/g)?.join('-') || String(code);
+            addLog('Pairing', `Código gerado via MCP: ${formatted}`);
+            return { ok: true, code: formatted, rawCode: String(code), phone };
+        }
 
         default:
             throw new Error(`Ferramenta MCP desconhecida: ${name}`);
@@ -1072,6 +1088,26 @@ app.post('/api/session/restore', async (req, res) => {
             catch (e) { addLog('Erro', 'Erro ao restaurar sessão', getErrorDetails(e)); setBotState('error', 'Erro ao restaurar sessão'); restarting = false; }
         }, 500);
     } catch (e) { addLog('Erro', 'Erro ao restaurar sessão', getErrorDetails(e)); res.status(500).json({ ok: false, msg: getErrorDetails(e) }); }
+});
+
+app.post('/api/pairing-code', async (req, res) => {
+    try {
+        const phone = String(req.body?.phone || '').replace(/\D/g, '');
+        if (!phone || phone.length < 10 || phone.length > 15) {
+            return res.status(400).json({ ok: false, msg: 'Número inválido. Formato: 5511999999999 (código do país + DDD + número, sem espaços)' });
+        }
+        if (!clientInstance || typeof clientInstance.requestPairingCode !== 'function') {
+            return res.status(503).json({ ok: false, msg: 'Bot não está pronto para emparelhamento. Verifique se o QR está sendo exibido.' });
+        }
+        addLog('Pairing', `Solicitando código para ${phone}...`);
+        const code = await clientInstance.requestPairingCode(phone);
+        const formatted = String(code).match(/.{1,4}/g)?.join('-') || String(code);
+        addLog('Pairing', `Código gerado: ${formatted}`);
+        res.json({ ok: true, code: formatted, rawCode: String(code), phone });
+    } catch (e) {
+        addLog('Erro', 'Falha no emparelhamento', getErrorDetails(e));
+        res.status(500).json({ ok: false, msg: getErrorDetails(e) });
+    }
 });
 
 app.get('/', (req, res) => res.sendFile(path.join(__dirname, 'public', 'index.html')));

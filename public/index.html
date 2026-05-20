@@ -84,6 +84,10 @@ body::before{content:"";position:fixed;inset:0;background-image:linear-gradient(
           <img id="qr-img" src="" alt="QR Code" style="display:none"/>
           <div class="connected-state" id="connected-state"><i class="bi bi-check-circle-fill"></i><h3 class="h5 mt-2 mb-1">Bot conectado</h3><p class="muted mb-0">WhatsApp ativo e pronto para enviar mensagens.</p></div>
         </div>
+        <div class="mt-3 text-center">
+          <button class="btn btn-soft btn-sm" onclick="openPairingModal()" id="btn-pairing" title="Alternativa ao QR: código numérico"><i class="bi bi-phone-flip"></i> Emparelhar com código</button>
+          <div class="muted small mt-1">Alternativa mais confiável se o QR não funcionar.</div>
+        </div>
       </section>
     </div>
     <div class="col-lg-7">
@@ -238,6 +242,40 @@ body::before{content:"";position:fixed;inset:0;background-image:linear-gradient(
       </div>
       <div class="modal-body">
         <div class="vstack gap-2" id="use-predef-list"><div class="muted small">Nenhuma predefinida cadastrada.</div></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="modal fade" id="pairingModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-dialog-centered">
+    <div class="modal-content">
+      <div class="modal-header">
+        <div>
+          <h5 class="modal-title fw-black">Emparelhar com código</h5>
+          <div class="muted small">Alternativa ao QR Code. Digite seu número e cole o código no WhatsApp.</div>
+        </div>
+        <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Fechar"></button>
+      </div>
+      <div class="modal-body">
+        <div class="mb-3">
+          <label class="form-label">Seu número do WhatsApp (com código do país)</label>
+          <input class="form-control" id="pairing-phone" type="tel" placeholder="5511999999999" inputmode="numeric" autocomplete="tel">
+          <div class="muted small mt-1">Ex: 5511999999999 (55 Brasil + 11 DDD + número)</div>
+        </div>
+        <div id="pairing-result" class="d-none">
+          <div class="alert border-success text-center" style="background:#0a2818;border-color:#25d366;">
+            <div class="muted small mb-1">Código de emparelhamento gerado</div>
+            <div id="pairing-code-display" class="display-6 fw-black" style="color:var(--green);font-family:'Space Mono',monospace;letter-spacing:6px;">------</div>
+            <div class="muted small mt-2">Abra WhatsApp > Aparelhos Conectados > Conectar um dispositivo</div>
+            <div class="muted small">Digite ou cole o código acima.</div>
+          </div>
+        </div>
+        <div id="pairing-error" class="alert alert-danger d-none"></div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-soft" data-bs-dismiss="modal">Fechar</button>
+        <button type="button" class="btn btn-wa" id="btn-pairing-submit" onclick="gerarPairingCode()"><i class="bi bi-send"></i> Gerar código</button>
       </div>
     </div>
   </div>
@@ -990,6 +1028,59 @@ async function sessionAction(action) {
   } catch (e) {
     box.className = 'alert alert-danger';
     box.textContent = `Falha de rede ou servidor indisponível: ${e.message}`;
+  }
+}
+
+function openPairingModal() {
+  document.getElementById('pairing-phone').value = '';
+  document.getElementById('pairing-result').classList.add('d-none');
+  document.getElementById('pairing-error').classList.add('d-none');
+  document.getElementById('btn-pairing-submit').disabled = false;
+  document.getElementById('btn-pairing-submit').innerHTML = '<i class="bi bi-send"></i> Gerar código';
+  bootstrap.Modal.getOrCreateInstance(document.getElementById('pairingModal')).show();
+  setTimeout(() => document.getElementById('pairing-phone').focus(), 300);
+}
+
+async function gerarPairingCode() {
+  const phone = document.getElementById('pairing-phone').value.replace(/\D/g, '');
+  const btn = document.getElementById('btn-pairing-submit');
+  const error = document.getElementById('pairing-error');
+  const result = document.getElementById('pairing-result');
+
+  if (!phone || phone.length < 10 || phone.length > 15) {
+    error.className = 'alert alert-danger';
+    error.textContent = 'Número inválido. Digite o número com DDD e código do país (ex: 5511999999999).';
+    error.classList.remove('d-none');
+    return;
+  }
+
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner-border spinner-border-sm"></span> Gerando...';
+  error.classList.add('d-none');
+  result.classList.add('d-none');
+
+  try {
+    const r = await fetch('/api/pairing-code', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ phone })
+    });
+    const d = await r.json();
+    if (!r.ok || d.ok === false) {
+      error.className = 'alert alert-danger';
+      error.textContent = d.msg || 'Erro ao gerar código.';
+      error.classList.remove('d-none');
+      return;
+    }
+    document.getElementById('pairing-code-display').textContent = d.code;
+    result.classList.remove('d-none');
+  } catch (e) {
+    error.className = 'alert alert-danger';
+    error.textContent = `Erro de conexão: ${e.message}`;
+    error.classList.remove('d-none');
+  } finally {
+    btn.disabled = false;
+    btn.innerHTML = '<i class="bi bi-send"></i> Gerar código';
   }
 }
 
