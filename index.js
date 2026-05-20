@@ -9,7 +9,6 @@ const archiver = require('archiver');
 const unzipper = require('unzipper');
 const pino = require('pino');
 const WebSocket = require('ws');
-const crypto = require('crypto');
 const { createClient } = require('@supabase/supabase-js');
 
 // Supabase v2 precisa de WebSocket explícito no Node 20 usado pelo Render.
@@ -35,8 +34,8 @@ const SESSION_AUTOSAVE_MS = Number(process.env.SESSION_AUTOSAVE_MS || 60000);
 const MARK_ONLINE_ON_CONNECT = String(process.env.MARK_ONLINE_ON_CONNECT || 'false').toLowerCase() === 'true';
 const SEND_TIMEOUT_MS = Number(process.env.SEND_TIMEOUT_MS || 45000);
 const DEBUG_SEND = String(process.env.DEBUG_SEND || 'true').toLowerCase() !== 'false';
-const SEND_RETRY_ATTEMPTS = Number(process.env.SEND_RETRY_ATTEMPTS || 2);
-const SEND_RETRY_DELAY_MS = Number(process.env.SEND_RETRY_DELAY_MS || 2500);
+// Tempo de aquecimento após conexão antes de liberar envios (Signal precisa sincronizar chaves)
+const CONNECT_WARMUP_MS = Number(process.env.CONNECT_WARMUP_MS || 8000);
 
 const SUPABASE_URL = process.env.SUPABASE_URL || '';
 const SUPABASE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY || '';
@@ -83,14 +82,6 @@ const shortJson = obj => {
     } catch { return String(obj).slice(0, 800); }
 };
 const msgKeyInfo = key => key ? `id=${key.id || ''} jid=${key.remoteJid || ''} fromMe=${key.fromMe === true}` : 'sem key';
-
-const isNoSessionErr = e => /no sessions|sessionerror|session error/i.test(errMsg(e) + ' ' + String(e?.stack || ''));
-const safeErrorDetails = e => ({
-    message: e?.message || String(e || ''),
-    name: e?.name || '',
-    code: e?.code || e?.status || e?.output?.statusCode || '',
-    stack: DEBUG_SEND ? String(e?.stack || '').split('\n').slice(0, 7).join('\n') : undefined
-});
 
 let baileys = null;
 let DisconnectReason = {};
@@ -149,6 +140,7 @@ let client = null;
 let scheduledJobs = {};
 let logs = [];
 let restarting = false;
+let botReady = false; // true somente após warmup pós-conexão (Signal keys sincronizadas)
 let memWarn = false;
 let reconnectTimer = null;
 let shuttingDown = false;
@@ -417,7 +409,26 @@ async function iniciarBot() {
         mkdir(AUTH_DIR);
         await loadBaileys();
         log('Info', `Auth Baileys: ${AUTH_DIR}`);
-        if (fs.existsSync(path.join(AUTH_DIR, 'creds.json'))) log('Info', 'Sessão existente detectada.');
+        const credsExist = fs.existsSync(path.join(AUTH_DIR, 'creds.json'));
+        if (credsExist) {
+            log('Info', 'Sessão existente detectada.');
+        } else if (supabase) {
+            // Sem sessão local — tenta restaurar do Supabase antes de iniciar socket
+            log('Sessão', 'Sem sessão local. Tentando restaurar do Supabase...');
+            try {
+                setState('restoring', 'Restaurando sessão do Supabase...');
+                const tmp = `/tmp/baileys_res_${Date.now()}.zip`;
+                const { data, error } = await supabase.storage.from(SUPABASE_BUCKET).download(SUPABASE_SESSION_PATH);
+                if (error) throw error;
+                await fs.promises.writeFile(tmp, Buffer.from(await data.arrayBuffer()));
+                await rmrf(AUTH_DIR);
+                await new Promise((res, rej) => { fs.createReadStream(tmp).pipe(unzipper.Extract({ path: AUTH_DIR })).on('close', res).on('error', rej); });
+                await fs.promises.rm(tmp, { force: true });
+                log('Sessão', 'Sessão restaurada do Supabase com sucesso.');
+            } catch (e) {
+                log('Aviso', 'Não foi possível restaurar sessão do Supabase', errMsg(e));
+            }
+        }
         try {
             const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
             let version;
@@ -464,21 +475,30 @@ async function iniciarBot() {
                 }
                 if (connection === 'open') {
                     botConnected = true;
+                    botReady = false;
                     restarting = false;
                     qrDataURL = null;
                     qrString = null;
                     pairingPhone = '';
                     pairingRequestedFor = '';
                     lastPairingCode = '';
-                    setState('ready', 'Conectado');
+                    setState('warming', `Conectado. Aguardando ${Math.round(CONNECT_WARMUP_MS / 1000)}s para sincronizar chaves...`);
                     log('Sessão', isNewLogin ? 'Conectado com novo login.' : 'Conectado.');
                     invalCache();
                     scheduleAll();
                     scheduleSessionAutosave();
                     listGroups().catch(e => log('Aviso', 'Não foi possível carregar grupos', errMsg(e)));
+                    // Warmup: aguarda o Signal Protocol estabelecer sessões antes de liberar envios
+                    const warmupTimer = setTimeout(() => {
+                        botReady = true;
+                        setState('ready', 'Conectado');
+                        log('Sessão', `Pronto para enviar após warmup de ${Math.round(CONNECT_WARMUP_MS / 1000)}s.`);
+                    }, CONNECT_WARMUP_MS);
+                    warmupTimer.unref?.();
                 }
                 if (connection === 'close') {
                     botConnected = false;
+                    botReady = false;
                     const code = lastDisconnect?.error?.output?.statusCode || lastDisconnect?.error?.statusCode;
                     const loggedOut = code === DisconnectReason.loggedOut || code === 401;
                     const restartRequired = code === DisconnectReason.restartRequired;
@@ -591,6 +611,10 @@ async function enviarMsg(grupo, mensagem, meta = {}) {
         log('Erro', `Bot não conectado (${botStatus})`);
         return { ok: false, msg: `Bot não conectado. Estado: ${botStatus}` };
     }
+    if (!botReady) {
+        log('Aviso', `Bot em warmup, aguarde (${botStatus})`);
+        return { ok: false, msg: `Bot ainda sincronizando chaves de sessão. Tente novamente em alguns segundos. Estado: ${botStatus}` };
+    }
     try {
         const msg = sanitize(applyVars(mensagem, grupo));
         if (!msg) return { ok: false, msg: 'Mensagem vazia' };
@@ -628,31 +652,12 @@ async function enviarMsg(grupo, mensagem, meta = {}) {
             }
         }
 
-        let lastErr = null;
-        for (let attempt = 1; attempt <= Math.max(1, SEND_RETRY_ATTEMPTS + 1); attempt++) {
-            try {
-                log('WhatsApp', `Enviando para "${destNome}" (${destId}) — ${msg.length} caracteres — tentativa ${attempt}`);
-                const sent = await withTimeout(client.sendMessage(destId, { text: msg }), SEND_TIMEOUT_MS, 'envio WhatsApp');
-                const id = sent?.key?.id || '';
-                log('Sucesso', `Enviado para "${destNome}" — ${msgKeyInfo(sent?.key)}`);
-                if (DEBUG_SEND) log('Debug', `Retorno sendMessage: ${shortJson(sent)}`);
-                return { ok: true, id, grupo: destNome, grupoId: destId, jid: destId, status: 'sent', attempt };
-            } catch (e) {
-                lastErr = e;
-                log('Erro', `Falha envio tentativa ${attempt} para "${destNome}"`, errMsg(e));
-                if (DEBUG_SEND) log('Debug', `Erro detalhado envio: ${shortJson(safeErrorDetails(e))}`);
-
-                if (isNoSessionErr(e)) {
-                    log('Sessão', 'Baileys retornou No sessions. Renovando metadata/cache antes de tentar novamente.');
-                    invalCache();
-                    try { await withTimeout(client.groupMetadata(destId), 20000, 'renovar metadata do grupo'); } catch (mde) { log('Aviso', 'Renovar metadata falhou', errMsg(mde)); }
-                    try { await listGroups(); } catch (gle) { log('Aviso', 'Recarregar grupos falhou', errMsg(gle)); }
-                }
-
-                if (attempt <= SEND_RETRY_ATTEMPTS) await wait(SEND_RETRY_DELAY_MS * attempt);
-            }
-        }
-        throw lastErr || new Error('Falha desconhecida no envio');
+        log('WhatsApp', `Enviando para "${destNome}" (${destId}) — ${msg.length} caracteres`);
+        const sent = await withTimeout(client.sendMessage(destId, { text: msg }), SEND_TIMEOUT_MS, 'envio WhatsApp');
+        const id = sent?.key?.id || '';
+        log('Sucesso', `Enviado para "${destNome}" — ${msgKeyInfo(sent?.key)}`);
+        if (DEBUG_SEND) log('Debug', `Retorno sendMessage: ${shortJson(sent)}`);
+        return { ok: true, id, grupo: destNome, grupoId: destId, jid: destId, status: 'sent' };
     } catch (e) {
         log('Erro', `Falha envio para "${grupo || meta.grupoId || '?'}"`, errMsg(e));
         if (e?.stack && DEBUG_SEND) console.error(e.stack);
@@ -678,26 +683,6 @@ function scheduleAll() {
     });
 }
 
-const mcpSessions = new Map();
-const MCP_SESSION_TTL_MS = Number(process.env.MCP_SESSION_TTL_MS || 12 * 60 * 60 * 1000);
-const newMcpSession = () => {
-    const id = crypto.randomUUID ? crypto.randomUUID() : crypto.randomBytes(16).toString('hex');
-    mcpSessions.set(id, Date.now());
-    return id;
-};
-const touchMcpSession = id => {
-    if (!id) return false;
-    const at = mcpSessions.get(id);
-    if (!at) return false;
-    if (Date.now() - at > MCP_SESSION_TTL_MS) { mcpSessions.delete(id); return false; }
-    mcpSessions.set(id, Date.now());
-    return true;
-};
-setInterval(() => {
-    const now = Date.now();
-    for (const [id, at] of mcpSessions) if (now - at > MCP_SESSION_TTL_MS) mcpSessions.delete(id);
-}, 60 * 60 * 1000).unref?.();
-
 const mcpAuth = (req, res, next) => {
     if (!MCP_AUTH_TOKEN) return res.status(503).json({ ok: false, error: 'MCP_AUTH_TOKEN não configurado.' });
     const t = (req.headers.authorization || '').replace(/^Bearer\s+/i, '').trim();
@@ -706,7 +691,7 @@ const mcpAuth = (req, res, next) => {
 };
 const mcpR = (obj, isError = false) => ({ content: [{ type: 'text', text: JSON.stringify(obj, null, 2) }], isError });
 const mcpStatus = () => ({
-    connected: botConnected, state: botState, status: botStatus, restarting, engine: 'baileys', timezone: BRASILIA_TZ,
+    connected: botConnected, ready: botReady, state: botState, status: botStatus, restarting, engine: 'baileys', timezone: BRASILIA_TZ,
     uptimeSeconds: Math.floor(process.uptime()), startedAt: STARTED_AT.toISOString(),
     supabaseConfigured: Boolean(supabase), gruposCacheValido: Boolean(groupsCache.list), gruposCacheTotal: groupsCache.list?.length || 0,
     agendamentos: config.agendamentos.length, agendamentosAtivos: config.agendamentos.filter(a => a.ativo).length,
@@ -764,7 +749,7 @@ const handleMcp = async payload => {
     if (!payload || typeof payload !== 'object') return { jsonrpc: '2.0', id: null, error: { code: -32600, message: 'Inválido' } };
     const id = payload.id ?? null;
     try {
-        if (payload.method === 'initialize') return { jsonrpc: '2.0', id, result: { protocolVersion: payload.params?.protocolVersion || '2024-11-05', capabilities: { tools: {} }, serverInfo: { name: 'bot-whatsapp-mcp-baileys', version: '4.0.6' } } };
+        if (payload.method === 'initialize') return { jsonrpc: '2.0', id, result: { protocolVersion: payload.params?.protocolVersion || '2024-11-05', capabilities: { tools: {} }, serverInfo: { name: 'bot-whatsapp-mcp-baileys', version: '4.0.4' } } };
         if (payload.method === 'notifications/initialized') return null;
         if (payload.method === 'tools/list') return { jsonrpc: '2.0', id, result: { tools: mcpTools() } };
         if (payload.method === 'tools/call') { const r = await callMcp(payload.params.name, payload.params.arguments); return { jsonrpc: '2.0', id, result: mcpR(r) }; }
@@ -772,57 +757,18 @@ const handleMcp = async payload => {
     } catch (e) { return { jsonrpc: '2.0', id, result: mcpR({ ok: false, error: errMsg(e) }, true) }; }
 };
 
-app.get('/api/health', (req, res) => res.json({ ok: true, service: 'wa-bot-baileys', uptime: Math.floor(process.uptime()), state: botState, connected: botConnected, engine: 'baileys', mcpConfigured: Boolean(MCP_AUTH_TOKEN) }));
+app.get('/api/health', (req, res) => res.json({ ok: true, service: 'wa-bot-baileys', uptime: Math.floor(process.uptime()), state: botState, connected: botConnected, ready: botReady, engine: 'baileys', mcpConfigured: Boolean(MCP_AUTH_TOKEN) }));
 app.get('/health', (req, res) => res.redirect('/api/health'));
 app.get('/ping', (req, res) => res.send('pong'));
-app.options(MCP_ENDPOINT, mcpAuth, (req, res) => {
-    res.setHeader('Mcp-Protocol-Version', '2024-11-05');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, Mcp-Session-Id, mcp-session-id');
-    res.setHeader('Access-Control-Allow-Methods', 'GET,POST,DELETE,OPTIONS');
-    res.status(204).end();
-});
-app.get(MCP_ENDPOINT, mcpAuth, (req, res) => {
-    const accept = String(req.headers.accept || '');
-    const sid = req.headers['mcp-session-id'] || req.headers['Mcp-Session-Id'] || newMcpSession();
-    if (!touchMcpSession(String(sid))) mcpSessions.set(String(sid), Date.now());
-    res.setHeader('Mcp-Session-Id', String(sid));
-    res.setHeader('Mcp-Protocol-Version', '2024-11-05');
-    if (accept.includes('text/event-stream')) {
-        res.writeHead(200, {
-            'Content-Type': 'text/event-stream',
-            'Cache-Control': 'no-cache, no-transform',
-            'Connection': 'keep-alive',
-            'Mcp-Session-Id': String(sid),
-            'Mcp-Protocol-Version': '2024-11-05'
-        });
-        res.write(`event: endpoint\ndata: ${JSON.stringify({ endpoint: MCP_ENDPOINT, sessionId: String(sid) })}\n\n`);
-        const keep = setInterval(() => res.write(': keepalive\n\n'), 25000);
-        req.on('close', () => clearInterval(keep));
-        return;
-    }
-    res.json({ ok: true, name: 'bot-whatsapp-mcp-baileys', sessionId: String(sid), sessions: mcpSessions.size, tools: mcpTools().map(t => t.name) });
-});
-app.delete(MCP_ENDPOINT, mcpAuth, (req, res) => {
-    const sid = String(req.headers['mcp-session-id'] || req.headers['Mcp-Session-Id'] || '');
-    if (sid) mcpSessions.delete(sid);
-    res.status(204).end();
-});
+app.get(MCP_ENDPOINT, mcpAuth, (req, res) => res.json({ ok: true, name: 'bot-whatsapp-mcp-baileys', tools: mcpTools().map(t => t.name) }));
 app.post(MCP_ENDPOINT, mcpAuth, async (req, res) => {
     try {
-        let sid = String(req.headers['mcp-session-id'] || req.headers['Mcp-Session-Id'] || '');
-        const isInit = Array.isArray(req.body) ? req.body.some(x => x?.method === 'initialize') : req.body?.method === 'initialize';
-        if (!sid || !touchMcpSession(sid)) {
-            sid = newMcpSession();
-            if (!isInit) log('MCP', `Criada nova sessão MCP automaticamente para ${req.body?.method || 'batch'}`);
-        }
-        res.setHeader('Mcp-Session-Id', sid);
-        res.setHeader('Mcp-Protocol-Version', '2024-11-05');
         if (Array.isArray(req.body)) return res.json((await Promise.all(req.body.map(handleMcp))).filter(Boolean));
         const r = await handleMcp(req.body); if (!r) return res.status(202).end(); res.json(r);
     } catch (e) { res.status(500).json({ jsonrpc: '2.0', id: null, error: { code: -32000, message: errMsg(e) } }); }
 });
 app.get('/api/status', (req, res) => res.json({
-    connected: botConnected, state: botState, status: botStatus, restarting, engine: 'baileys',
+    connected: botConnected, ready: botReady, state: botState, status: botStatus, restarting, engine: 'baileys',
     qr: qrDataURL, qrRaw: qrString, pairingCode: lastPairingCode,
     supabaseConfigured: Boolean(supabase), supabaseBucket: SUPABASE_BUCKET, supabaseSessionPath: SUPABASE_SESSION_PATH,
     uptimeSeconds: Math.floor(process.uptime()), startedAt: STARTED_AT.toISOString(),
