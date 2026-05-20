@@ -9,6 +9,7 @@ const archiver = require('archiver');
 const unzipper = require('unzipper');
 const pino = require('pino');
 const WebSocket = require('ws');
+const crypto = require('crypto');
 const { createClient } = require('@supabase/supabase-js');
 
 // Supabase v2 precisa de WebSocket explícito no Node 20 usado pelo Render.
@@ -32,6 +33,10 @@ const PAIRING_WAIT_MS = Number(process.env.PAIRING_WAIT_MS || 90000);
 const RECONNECT_DELAY_MS = Number(process.env.RECONNECT_DELAY_MS || 5000);
 const SESSION_AUTOSAVE_MS = Number(process.env.SESSION_AUTOSAVE_MS || 60000);
 const MARK_ONLINE_ON_CONNECT = String(process.env.MARK_ONLINE_ON_CONNECT || 'false').toLowerCase() === 'true';
+const SEND_TIMEOUT_MS = Number(process.env.SEND_TIMEOUT_MS || 45000);
+const DEBUG_SEND = String(process.env.DEBUG_SEND || 'true').toLowerCase() !== 'false';
+const SEND_RETRY_ATTEMPTS = Number(process.env.SEND_RETRY_ATTEMPTS || 2);
+const SEND_RETRY_DELAY_MS = Number(process.env.SEND_RETRY_DELAY_MS || 2500);
 
 const SUPABASE_URL = process.env.SUPABASE_URL || '';
 const SUPABASE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY || '';
@@ -61,6 +66,31 @@ const toUserJid = id => {
     if (!v) return '';
     return `${v}@s.whatsapp.net`;
 };
+
+const sleepReject = (ms, label = 'operação') => new Promise((_, reject) => {
+    const t = setTimeout(() => reject(new Error(`${label} excedeu ${Math.round(ms / 1000)}s`)), ms);
+    t.unref?.();
+});
+const withTimeout = (promise, ms, label) => Promise.race([promise, sleepReject(ms, label)]);
+const shortJson = obj => {
+    try {
+        return JSON.stringify(obj, (k, v) => {
+            if (typeof v === 'bigint') return v.toString();
+            if (Buffer.isBuffer(v)) return `[Buffer ${v.length}]`;
+            if (v instanceof Uint8Array) return `[Uint8Array ${v.length}]`;
+            return v;
+        }).slice(0, 800);
+    } catch { return String(obj).slice(0, 800); }
+};
+const msgKeyInfo = key => key ? `id=${key.id || ''} jid=${key.remoteJid || ''} fromMe=${key.fromMe === true}` : 'sem key';
+
+const isNoSessionErr = e => /no sessions|sessionerror|session error/i.test(errMsg(e) + ' ' + String(e?.stack || ''));
+const safeErrorDetails = e => ({
+    message: e?.message || String(e || ''),
+    name: e?.name || '',
+    code: e?.code || e?.status || e?.output?.statusCode || '',
+    stack: DEBUG_SEND ? String(e?.stack || '').split('\n').slice(0, 7).join('\n') : undefined
+});
 
 let baileys = null;
 let DisconnectReason = {};
@@ -475,11 +505,22 @@ async function iniciarBot() {
             });
 
             sock.ev.on('messages.upsert', async ev => {
+                if (DEBUG_SEND && ev?.messages?.length) log('Debug', `messages.upsert tipo=${ev.type || '?'} qtd=${ev.messages.length}`);
                 for (const msg of ev.messages || []) await handleIncomingMessage(msg).catch(e => log('Erro', 'Mensagem recebida', errMsg(e)));
             });
 
-            sock.ev.on('groups.update', () => invalCache());
-            sock.ev.on('group-participants.update', () => invalCache());
+            sock.ev.on('messages.update', updates => {
+                if (!DEBUG_SEND) return;
+                for (const u of updates || []) log('Debug', `messages.update — ${msgKeyInfo(u.key)} update=${shortJson(u.update || {})}`);
+            });
+
+            sock.ev.on('message-receipt.update', updates => {
+                if (!DEBUG_SEND) return;
+                for (const u of updates || []) log('Debug', `receipt.update — ${shortJson(u)}`);
+            });
+
+            sock.ev.on('groups.update', updates => { invalCache(); if (DEBUG_SEND) log('Debug', `groups.update qtd=${updates?.length || 0}`); });
+            sock.ev.on('group-participants.update', ev => { invalCache(); if (DEBUG_SEND) log('Debug', `group-participants.update ${shortJson(ev)}`); });
             log('Bot', 'Socket Baileys iniciado.');
         } catch (e) {
             client = null;
@@ -500,7 +541,9 @@ async function iniciarBot() {
 
 async function sendText(jid, text) {
     if (!client) throw new Error('Socket não iniciado');
-    return await client.sendMessage(jid, { text });
+    const sent = await withTimeout(client.sendMessage(jid, { text }), SEND_TIMEOUT_MS, 'envio de resposta');
+    if (DEBUG_SEND) log('Debug', `Resposta enviada — ${msgKeyInfo(sent?.key)}`);
+    return sent;
 }
 function unwrapText(msg) {
     const m = msg.message || {};
@@ -543,6 +586,7 @@ async function listGroups() {
     } catch (e) { groupsCache.building = false; throw e; }
 }
 async function enviarMsg(grupo, mensagem, meta = {}) {
+    const origem = meta.origem || 'painel';
     if (!client || !botConnected) {
         log('Erro', `Bot não conectado (${botStatus})`);
         return { ok: false, msg: `Bot não conectado. Estado: ${botStatus}` };
@@ -552,22 +596,68 @@ async function enviarMsg(grupo, mensagem, meta = {}) {
         if (!msg) return { ok: false, msg: 'Mensagem vazia' };
         let destId = jidClean(meta.grupoId || grupo);
         let destNome = grupo || destId;
+
+        if (DEBUG_SEND) log('Debug', `Preparando envio origem=${origem} grupo=${JSON.stringify(grupo)} grupoId=${JSON.stringify(meta.grupoId || '')} chars=${msg.length}`);
+
         if (destId && !destId.includes('@') && /^\d+$/.test(destId)) destId = toGroupJid(destId);
         if (!destId || !destId.endsWith('@g.us')) {
             const groups = await listGroups();
-            const match = groups.find(g => g.nome === grupo || g.id === grupo || g.id === meta.grupoId);
-            if (!match) return { ok: false, msg: `Grupo "${grupo}" não encontrado` };
+            const alvo = String(grupo || '').trim().toLowerCase();
+            const match = groups.find(g => g.nome === grupo || g.id === grupo || g.id === meta.grupoId || g.nome.toLowerCase() === alvo);
+            if (!match) {
+                const sample = groups.slice(0, 8).map(g => `${g.nome}=${g.id}`).join(' | ');
+                log('Erro', `Grupo não encontrado: ${grupo}`, sample || 'cache vazio');
+                return { ok: false, msg: `Grupo "${grupo}" não encontrado`, gruposConhecidos: groups.length };
+            }
             destId = match.id;
             destNome = match.nome;
         } else if (destId.endsWith('@g.us')) {
             const cached = groupsCache.list?.find(g => g.id === destId);
             if (cached) destNome = cached.nome;
         }
-        log('WhatsApp', `Enviando para "${destNome}" (${destId})`);
-        const sent = await client.sendMessage(destId, { text: msg });
-        log('Sucesso', `Enviado "${destNome}"`);
-        return { ok: true, id: sent?.key?.id || '', grupo: destNome, grupoId: destId };
-    } catch (e) { return { ok: false, msg: errMsg(e) }; }
+
+        if (!destId || !destId.endsWith('@g.us')) return { ok: false, msg: `Destino inválido: ${destId || '(vazio)'}` };
+
+        if (DEBUG_SEND && typeof client.groupMetadata === 'function') {
+            try {
+                const md = await withTimeout(client.groupMetadata(destId), 15000, 'validar grupo');
+                destNome = md?.subject || destNome;
+                log('Debug', `Grupo validado "${destNome}" participantes=${md?.participants?.length ?? '?'}`);
+            } catch (e) {
+                log('Aviso', `Não consegui validar metadata do grupo ${destId}`, errMsg(e));
+            }
+        }
+
+        let lastErr = null;
+        for (let attempt = 1; attempt <= Math.max(1, SEND_RETRY_ATTEMPTS + 1); attempt++) {
+            try {
+                log('WhatsApp', `Enviando para "${destNome}" (${destId}) — ${msg.length} caracteres — tentativa ${attempt}`);
+                const sent = await withTimeout(client.sendMessage(destId, { text: msg }), SEND_TIMEOUT_MS, 'envio WhatsApp');
+                const id = sent?.key?.id || '';
+                log('Sucesso', `Enviado para "${destNome}" — ${msgKeyInfo(sent?.key)}`);
+                if (DEBUG_SEND) log('Debug', `Retorno sendMessage: ${shortJson(sent)}`);
+                return { ok: true, id, grupo: destNome, grupoId: destId, jid: destId, status: 'sent', attempt };
+            } catch (e) {
+                lastErr = e;
+                log('Erro', `Falha envio tentativa ${attempt} para "${destNome}"`, errMsg(e));
+                if (DEBUG_SEND) log('Debug', `Erro detalhado envio: ${shortJson(safeErrorDetails(e))}`);
+
+                if (isNoSessionErr(e)) {
+                    log('Sessão', 'Baileys retornou No sessions. Renovando metadata/cache antes de tentar novamente.');
+                    invalCache();
+                    try { await withTimeout(client.groupMetadata(destId), 20000, 'renovar metadata do grupo'); } catch (mde) { log('Aviso', 'Renovar metadata falhou', errMsg(mde)); }
+                    try { await listGroups(); } catch (gle) { log('Aviso', 'Recarregar grupos falhou', errMsg(gle)); }
+                }
+
+                if (attempt <= SEND_RETRY_ATTEMPTS) await wait(SEND_RETRY_DELAY_MS * attempt);
+            }
+        }
+        throw lastErr || new Error('Falha desconhecida no envio');
+    } catch (e) {
+        log('Erro', `Falha envio para "${grupo || meta.grupoId || '?'}"`, errMsg(e));
+        if (e?.stack && DEBUG_SEND) console.error(e.stack);
+        return { ok: false, msg: errMsg(e), stack: DEBUG_SEND ? String(e?.stack || '').split('\n').slice(0, 4).join('\n') : undefined };
+    }
 }
 function scheduleAll() {
     Object.values(scheduledJobs).forEach(j => j.stop());
@@ -587,6 +677,26 @@ function scheduleAll() {
         } catch (e) { log('Erro', `Cron inválido ${a.id}`, errMsg(e)); }
     });
 }
+
+const mcpSessions = new Map();
+const MCP_SESSION_TTL_MS = Number(process.env.MCP_SESSION_TTL_MS || 12 * 60 * 60 * 1000);
+const newMcpSession = () => {
+    const id = crypto.randomUUID ? crypto.randomUUID() : crypto.randomBytes(16).toString('hex');
+    mcpSessions.set(id, Date.now());
+    return id;
+};
+const touchMcpSession = id => {
+    if (!id) return false;
+    const at = mcpSessions.get(id);
+    if (!at) return false;
+    if (Date.now() - at > MCP_SESSION_TTL_MS) { mcpSessions.delete(id); return false; }
+    mcpSessions.set(id, Date.now());
+    return true;
+};
+setInterval(() => {
+    const now = Date.now();
+    for (const [id, at] of mcpSessions) if (now - at > MCP_SESSION_TTL_MS) mcpSessions.delete(id);
+}, 60 * 60 * 1000).unref?.();
 
 const mcpAuth = (req, res, next) => {
     if (!MCP_AUTH_TOKEN) return res.status(503).json({ ok: false, error: 'MCP_AUTH_TOKEN não configurado.' });
@@ -654,7 +764,7 @@ const handleMcp = async payload => {
     if (!payload || typeof payload !== 'object') return { jsonrpc: '2.0', id: null, error: { code: -32600, message: 'Inválido' } };
     const id = payload.id ?? null;
     try {
-        if (payload.method === 'initialize') return { jsonrpc: '2.0', id, result: { protocolVersion: payload.params?.protocolVersion || '2024-11-05', capabilities: { tools: {} }, serverInfo: { name: 'bot-whatsapp-mcp-baileys', version: '4.0.3' } } };
+        if (payload.method === 'initialize') return { jsonrpc: '2.0', id, result: { protocolVersion: payload.params?.protocolVersion || '2024-11-05', capabilities: { tools: {} }, serverInfo: { name: 'bot-whatsapp-mcp-baileys', version: '4.0.6' } } };
         if (payload.method === 'notifications/initialized') return null;
         if (payload.method === 'tools/list') return { jsonrpc: '2.0', id, result: { tools: mcpTools() } };
         if (payload.method === 'tools/call') { const r = await callMcp(payload.params.name, payload.params.arguments); return { jsonrpc: '2.0', id, result: mcpR(r) }; }
@@ -665,9 +775,48 @@ const handleMcp = async payload => {
 app.get('/api/health', (req, res) => res.json({ ok: true, service: 'wa-bot-baileys', uptime: Math.floor(process.uptime()), state: botState, connected: botConnected, engine: 'baileys', mcpConfigured: Boolean(MCP_AUTH_TOKEN) }));
 app.get('/health', (req, res) => res.redirect('/api/health'));
 app.get('/ping', (req, res) => res.send('pong'));
-app.get(MCP_ENDPOINT, mcpAuth, (req, res) => res.json({ ok: true, name: 'bot-whatsapp-mcp-baileys', tools: mcpTools().map(t => t.name) }));
+app.options(MCP_ENDPOINT, mcpAuth, (req, res) => {
+    res.setHeader('Mcp-Protocol-Version', '2024-11-05');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, Mcp-Session-Id, mcp-session-id');
+    res.setHeader('Access-Control-Allow-Methods', 'GET,POST,DELETE,OPTIONS');
+    res.status(204).end();
+});
+app.get(MCP_ENDPOINT, mcpAuth, (req, res) => {
+    const accept = String(req.headers.accept || '');
+    const sid = req.headers['mcp-session-id'] || req.headers['Mcp-Session-Id'] || newMcpSession();
+    if (!touchMcpSession(String(sid))) mcpSessions.set(String(sid), Date.now());
+    res.setHeader('Mcp-Session-Id', String(sid));
+    res.setHeader('Mcp-Protocol-Version', '2024-11-05');
+    if (accept.includes('text/event-stream')) {
+        res.writeHead(200, {
+            'Content-Type': 'text/event-stream',
+            'Cache-Control': 'no-cache, no-transform',
+            'Connection': 'keep-alive',
+            'Mcp-Session-Id': String(sid),
+            'Mcp-Protocol-Version': '2024-11-05'
+        });
+        res.write(`event: endpoint\ndata: ${JSON.stringify({ endpoint: MCP_ENDPOINT, sessionId: String(sid) })}\n\n`);
+        const keep = setInterval(() => res.write(': keepalive\n\n'), 25000);
+        req.on('close', () => clearInterval(keep));
+        return;
+    }
+    res.json({ ok: true, name: 'bot-whatsapp-mcp-baileys', sessionId: String(sid), sessions: mcpSessions.size, tools: mcpTools().map(t => t.name) });
+});
+app.delete(MCP_ENDPOINT, mcpAuth, (req, res) => {
+    const sid = String(req.headers['mcp-session-id'] || req.headers['Mcp-Session-Id'] || '');
+    if (sid) mcpSessions.delete(sid);
+    res.status(204).end();
+});
 app.post(MCP_ENDPOINT, mcpAuth, async (req, res) => {
     try {
+        let sid = String(req.headers['mcp-session-id'] || req.headers['Mcp-Session-Id'] || '');
+        const isInit = Array.isArray(req.body) ? req.body.some(x => x?.method === 'initialize') : req.body?.method === 'initialize';
+        if (!sid || !touchMcpSession(sid)) {
+            sid = newMcpSession();
+            if (!isInit) log('MCP', `Criada nova sessão MCP automaticamente para ${req.body?.method || 'batch'}`);
+        }
+        res.setHeader('Mcp-Session-Id', sid);
+        res.setHeader('Mcp-Protocol-Version', '2024-11-05');
         if (Array.isArray(req.body)) return res.json((await Promise.all(req.body.map(handleMcp))).filter(Boolean));
         const r = await handleMcp(req.body); if (!r) return res.status(202).end(); res.json(r);
     } catch (e) { res.status(500).json({ jsonrpc: '2.0', id: null, error: { code: -32000, message: errMsg(e) } }); }

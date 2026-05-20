@@ -83,7 +83,12 @@ POST /api/enviar
 - Fixado `@whiskeysockets/baileys` em `6.7.16` e importação robusta para CommonJS/ESM, evitando `makeWASocket is not a function`.
 
 
-## Correção v4.0.3
+## Correção v4.0.4
 
 - Adicionado `ws` e transporte explícito para Supabase no Node 20 do Render.
 - Corrige erro: `Node.js 20 detected without native WebSocket support`.
+
+
+## Debug de envio
+
+A versão 4.0.4 adiciona logs de envio: validação do grupo, tamanho da mensagem, retorno do `sendMessage`, timeout configurável por `SEND_TIMEOUT_MS` e eventos de ack/receipt quando `DEBUG_SEND=true`.
