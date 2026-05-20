@@ -3,13 +3,13 @@ services:
     name: bot-whatsapp
     env: node
     plan: free
-    buildCommand: npm install
-    startCommand: npm start
+    buildCommand: rm -rf node_modules package-lock.json && npm install
+    startCommand: node index.js
     envVars:
-      - key: WWEBJS_AUTH_DIR
-        value: /tmp/.wwebjs_auth
-      - key: WWEBJS_READY_WAIT_MS
-        value: 30000
+      - key: WPP_TOKEN_DIR
+        value: /tmp/wppconnect-tokens
+      - key: PUPPETEER_CACHE_DIR
+        value: /opt/render/.cache/puppeteer
       - key: SUPABASE_URL
         sync: false
       - key: SUPABASE_SERVICE_ROLE_KEY
@@ -17,4 +17,6 @@ services:
       - key: SUPABASE_BUCKET
         value: whatsapp-sessions
       - key: SUPABASE_SESSION_PATH
-        value: wwebjs_auth.zip
+        value: wppconnect-tokens.zip
+      - key: MCP_AUTH_TOKEN
+        sync: false

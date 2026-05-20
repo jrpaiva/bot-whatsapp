@@ -16,9 +16,12 @@ const BRASILIA_TZ = 'America/Sao_Paulo';
 const STARTED_AT = new Date();
 const MCP_AUTH_TOKEN = process.env.MCP_AUTH_TOKEN || '';
 const MCP_ENDPOINT = process.env.MCP_ENDPOINT || '/mcp';
-const LOG_MAX = Number(process.env.LOG_MAX_ENTRIES || 180);
-const LOG_CLEAR_H = Number(process.env.LOG_AUTO_CLEAR_HOURS || 12);
+const LOG_MAX = Number(process.env.LOG_MAX_ENTRIES || 300);
+const LOG_CLEAR_H = Number(process.env.LOG_AUTO_CLEAR_HOURS || 6);
 const MEM_WARN_MB = Number(process.env.MEMORY_WARN_MB || 420);
+const MEM_RESTART_MB = Number(process.env.MEMORY_RESTART_MB || 500);
+const QR_REFRESH_MS = Number(process.env.QR_REFRESH_MS || 30000);
+const RECONNECT_DELAY_MS = Number(process.env.RECONNECT_DELAY_MS || 5000);
 
 const SUPABASE_URL = process.env.SUPABASE_URL || '';
 const SUPABASE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY || '';
@@ -33,8 +36,6 @@ const PREDEF_FILE = process.env.BOT_PREDEFINIDAS_FILE || path.join('/tmp', 'pred
 app.use(express.json({ limit: '10mb' }));
 app.use(express.static('public'));
 
-// ─── UTILS ─────────────────────────────────────────────────────────────────
-
 const mkdir = p => { if (!fs.existsSync(p)) fs.mkdirSync(p, { recursive: true }); };
 const rmrf = async p => { if (fs.existsSync(p)) await fs.promises.rm(p, { recursive: true, force: true }); mkdir(p); };
 const wait = ms => new Promise(r => setTimeout(r, ms));
@@ -47,10 +48,9 @@ const brasil = () => {
     return { data: `${p.day}/${p.month}/${p.year}`, hora: `${p.hour}:${p.minute}`, diaSemana: p.weekday || '', saudacao: Number(p.hour) < 12 ? 'Bom dia' : Number(p.hour) < 18 ? 'Boa tarde' : 'Boa noite' };
 };
 
-// ─── STATE ─────────────────────────────────────────────────────────────────
-
 let config = { agendamentos: [] };
 let qrDataURL = null;
+let qrString = null;
 let botStatus = 'Inicializando...';
 let botState = 'starting';
 let botConnected = false;
@@ -61,6 +61,9 @@ let restarting = false;
 let memWarn = false;
 let initialSyncDone = false;
 let pendingAcks = {};
+let qrRefreshTimer = null;
+let reconnectTimer = null;
+let shuttingDown = false;
 
 let gruposCache = { list: null, at: 0, building: false };
 const CACHE_TTL = 2 * 60 * 1000;
@@ -83,6 +86,10 @@ const logMem = force => {
     if (force) { log('Sistema', `Memória: ${s}`); return; }
     if (r >= MEM_WARN_MB && !memWarn) { memWarn = true; log('Aviso', `Memória alta: ${s}.`); }
     if (r < MEM_WARN_MB - 60) memWarn = false;
+    if (r >= MEM_RESTART_MB) {
+        log('Aviso', `Memória crítica (${r}MB). Reiniciando browser...`);
+        reiniciarBot(true);
+    }
 };
 
 process.on('uncaughtException', e => { log('Erro', 'Exceção', errMsg(e)); console.error(e); });
@@ -93,9 +100,7 @@ logMem(true);
 if (LOG_CLEAR_H > 0) setInterval(() => { logs = []; logMem(true); }, LOG_CLEAR_H * 3600000);
 setInterval(() => logMem(false), 300000);
 
-// ─── CONFIG ────────────────────────────────────────────────────────────────
-
-const defaultConfig = () => ({ agendamentos: [{ id: 1, grupo: '', grupoId: '', mensagem: '', horario: '12:00', diasSemana: [1, 2, 3], cron: '0 12 * * 1,2,3', ativo: false }] });
+const defaultConfig = () => ({ agendamentos: [] });
 
 const parseDays = expr => {
     if (!expr || expr === '*') return [0, 1, 2, 3, 4, 5, 6];
@@ -138,8 +143,6 @@ const applyVars = (msg, grupo = '') => {
     const v = { grupo, data: p.data, hora: p.hora, diaSemana: p.diaSemana, saudacao: p.saudacao };
     return String(msg || '').replace(/{{\s*([\w.-]+)\s*}}/g, (_, k) => Object.prototype.hasOwnProperty.call(v, k) ? String(v[k]) : `{{${k}}}`);
 };
-
-// ─── SUPABASE ──────────────────────────────────────────────────────────────
 
 const reqSup = () => { if (!supabase) throw new Error('Supabase não configurado'); };
 
@@ -236,7 +239,7 @@ const restoreSessionRemote = async () => {
     const { data, error } = await supabase.storage.from(SUPABASE_BUCKET).download(SUPABASE_SESSION_PATH);
     if (error) throw error;
     await fs.promises.writeFile(tmp, Buffer.from(await data.arrayBuffer()));
-    await stopBot(true);
+    await pararBot(true);
     await rmrf(TOKEN_DIR);
     const sessionPath = path.join(TOKEN_DIR, 'whatsapp-bot');
     mkdir(sessionPath);
@@ -247,11 +250,38 @@ const restoreSessionRemote = async () => {
     await iniciarBot();
 };
 
-// ─── STOP / RESTART ────────────────────────────────────────────────────────
+async function ensureChrome() {
+    const cacheDir = process.env.PUPPETEER_CACHE_DIR || '/opt/render/.cache/puppeteer';
+    mkdir(cacheDir);
+    try {
+        const pb = require('@puppeteer/browsers');
+        const installed = await pb.install({
+            browser: 'chrome', buildId: '148.0.7778.97',
+            cacheDir, unpack: true,
+        });
+        log('Info', `Chrome: ${installed.path}`);
+        return;
+    } catch (e) {
+        log('Info', `@puppeteer/browsers fallback: ${errMsg(e)}`);
+    }
+    try {
+        const { execSync } = require('child_process');
+        execSync(`npx @puppeteer/browsers install chrome@148.0.7778.97 --path ${cacheDir}`, {
+            stdio: 'ignore', timeout: 180000,
+        });
+        log('Info', 'Chrome instalado via npx');
+    } catch (e2) {
+        log('Erro', 'Falha Chrome', errMsg(e2));
+        throw e2;
+    }
+}
 
-async function stopBot(keep = false) {
+async function pararBot(keep = false) {
+    if (shuttingDown) return;
     restarting = true;
     setState('restarting', 'Parando...');
+    if (qrRefreshTimer) { clearTimeout(qrRefreshTimer); qrRefreshTimer = null; }
+    if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
     Object.values(scheduledJobs).forEach(j => j.stop());
     scheduledJobs = {};
     invalCache();
@@ -259,38 +289,205 @@ async function stopBot(keep = false) {
     const old = client;
     client = null;
     botConnected = false;
-    qrDataURL = null;
     if (old) {
         try {
             if (typeof old.close === 'function') await old.close();
-            else if (typeof old.end === 'function') await old.end();
         } catch (e) { log('Aviso', 'Erro stop', errMsg(e)); }
     }
-    if (!keep) restarting = false;
+    if (!keep) { restarting = false; qrDataURL = null; qrString = null; }
 }
 
-// ─── CRON ──────────────────────────────────────────────────────────────────
-
-function scheduleAll() {
-    Object.values(scheduledJobs).forEach(j => j.stop());
-    scheduledJobs = {};
-    config = normCfg(config);
-    const ativos = config.agendamentos.filter(a => a.ativo && a.grupo && a.mensagem && a.cron);
-    log('Cron', `Reagendando ${ativos.length}/${config.agendamentos.length}`);
-    config.agendamentos.forEach(a => {
-        if (!a.ativo || !a.grupo || !a.mensagem || !a.cron) return;
-        try {
-            scheduledJobs[a.id] = cron.schedule(a.cron, async () => {
-                if (!a.ativo) return;
-                log('Cron', `Disparo: "${a.grupo}"`);
-                const r = await enviarMsg(a.grupo, a.mensagem, { origem: 'cron', grupoId: a.grupoId });
-                log(r.ok ? 'Cron' : 'Erro', `Disparo ${a.grupo}: ${r.ok ? 'OK' : r.msg}`);
-            }, { timezone: BRASILIA_TZ });
-        } catch (e) { log('Erro', `Cron inválido ${a.id}`, errMsg(e)); }
-    });
+async function reiniciarBot(keep = false) {
+    log('Bot', 'Reiniciando...');
+    await pararBot(true);
+    await wait(1500);
+    await iniciarBot();
 }
 
-// ─── WHATSAPP LIST GROUPS ──────────────────────────────────────────────────
+async function iniciarBot() {
+    if (client) return;
+    if (shuttingDown) return;
+    initialSyncDone = false;
+    setState('launching', 'Iniciando WhatsApp...');
+    mkdir(TOKEN_DIR);
+    log('Info', `Tokens: ${TOKEN_DIR}`);
+    try {
+        await ensureChrome();
+        const wpp = await wppconnect.create({
+            session: 'whatsapp-bot',
+            headless: true,
+            useChrome: false,
+            disableWelcome: true,
+            logQR: false,
+            autoClose: 0,
+            deviceName: 'WA Bot',
+            folderNameToken: TOKEN_DIR,
+            browserArgs: [
+                '--no-sandbox',
+                '--disable-setuid-sandbox',
+                '--disable-gpu',
+                '--disable-dev-shm-usage',
+                '--disable-software-rasterizer',
+                '--no-first-run',
+                '--no-zygote',
+            ],
+            onStateChange: state => {
+                log('Estado', `WhatsApp: ${state}`);
+                if (state === 'CONNECTED' || state === 'isLogged') {
+                    qrDataURL = null;
+                    qrString = null;
+                    setState('ready', 'Conectado');
+                    botConnected = true;
+                    restarting = false;
+                    if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+                    if (!initialSyncDone) {
+                        initialSyncDone = true;
+                        invalCache();
+                        scheduleAll();
+                        listGroups().catch(() => {});
+                    }
+                }
+                if (state === 'QRCode') {
+                    setState('qr', 'Aguardando escaneamento...');
+                    botConnected = false;
+                    restarting = false;
+                }
+                if (state === 'DISCONNECTED' || state === 'CONFLICT' || state === 'UNPAIRED' || state === 'UNPAIRED_IDLE') {
+                    botConnected = false;
+                    if (state === 'CONFLICT') log('Erro', 'Conflito: outro dispositivo');
+                    if (!shuttingDown && !restarting) {
+                        log('Bot', `Desconectado (${state}). Reconectando em ${RECONNECT_DELAY_MS/1000}s...`);
+                        if (reconnectTimer) clearTimeout(reconnectTimer);
+                        reconnectTimer = setTimeout(() => { reconnectTimer = null; reiniciarBot(); }, RECONNECT_DELAY_MS);
+                    }
+                }
+            },
+            onQRCode: async (qr) => {
+                qrString = qr;
+                try {
+                    qrDataURL = await qrcode.toDataURL(qr);
+                    log('QR', 'Novo QR Code disponível no painel.');
+                    scheduleQRRefresh();
+                } catch (e) { log('Erro', 'Falha QR', errMsg(e)); }
+            },
+        });
+
+        client = wpp;
+
+        wpp.onAck(async (ack) => {
+            const id = ack?.id || ack?._serialized || '';
+            const status = ack?.status ?? ack?.ack ?? -1;
+            const cb = pendingAcks[id];
+            if (cb) cb(status);
+        });
+
+        wpp.onParticipantsChanged(async () => { invalCache(); });
+
+        wpp.onMessage(async (msg) => {
+            try {
+                const isGroup = msg.isGroupMsg === true || msg.isGroup === true;
+                const from = isGroup ? (msg.chat?.name || msg.chat?.formattedTitle || msg.sender?.pushname || 'Alguém') : (msg.sender?.pushname || msg.notifyName || 'Alguém');
+                const text = (msg.body || msg.content || '').trim();
+                if (!text) return;
+                const lower = text.toLowerCase();
+
+                if (lower === '!ping') {
+                    await wpp.sendText(msg.from, '🏓 Pong!');
+                    return;
+                }
+                if (lower.startsWith('!echo ')) {
+                    await wpp.sendText(msg.from, text.slice(6));
+                    return;
+                }
+                if (lower === '!status' || lower === '!bot') {
+                    const st = mcpStatus();
+                    await wpp.sendText(msg.from, `🤖 Bot WhatsApp\nStatus: ${st.connected ? '✅ Conectado' : '❌ Desconectado'}\nAgendamentos: ${st.agendamentosAtivos}/${st.agendamentos} ativos\nUptime: ${Math.floor(st.uptimeSeconds / 60)}min`);
+                    return;
+                }
+
+                if (!isGroup && (lower === 'menu' || lower === '!menu' || lower === 'help' || lower === '!help')) {
+                    await wpp.sendText(msg.from, `🤖 *Comandos disponíveis*\n\n!ping — Testar resposta\n!echo <texto> — Repetir mensagem\n!status — Status do bot\n!menu — Esta mensagem\n\n💡 Envie seu número (ex: 5511999999999) para gerar código de emparelhamento.`);
+                    return;
+                }
+
+                if (!isGroup && /^\d{10,15}$/.test(text)) {
+                    try {
+                        const result = await gerarPairingCode(text);
+                        if (result) {
+                            await wpp.sendText(msg.from, `🔐 *Código de Emparelhamento*\n\nCódigo: ${result}\n\nAbra WhatsApp > Aparelhos Conectados > Conectar um dispositivo\nDigite o código acima.`);
+                        } else {
+                            await wpp.sendText(msg.from, '❌ Não foi possível gerar o código de emparelhamento. Use o QR Code no painel.');
+                        }
+                    } catch (e) {
+                        await wpp.sendText(msg.from, `❌ Erro: ${errMsg(e)}`);
+                    }
+                    return;
+                }
+            } catch (e) {
+                log('Erro', 'onMessage', errMsg(e));
+            }
+        });
+
+        log('Bot', 'Aguardando conexão...');
+        if (client && client.page) {
+            try {
+                const exists = await fs.promises.access(path.join(TOKEN_DIR, 'whatsapp-bot', 'Default', 'Local Storage', 'leveldb')).then(() => true).catch(() => false);
+                if (exists) log('Info', 'Sessão existente detectada.');
+            } catch {}
+        }
+    } catch (e) {
+        log('Erro', 'Falha iniciar bot', errMsg(e));
+        client = null;
+        restarting = false;
+        if (!shuttingDown) {
+            log('Bot', `Tentando novamente em ${RECONNECT_DELAY_MS/1000}s...`);
+            setTimeout(() => { if (!client && !shuttingDown) iniciarBot(); }, RECONNECT_DELAY_MS);
+        }
+    }
+}
+
+function scheduleQRRefresh() {
+    if (qrRefreshTimer) clearTimeout(qrRefreshTimer);
+    qrRefreshTimer = setTimeout(() => {
+        qrRefreshTimer = null;
+        if (!botConnected && !shuttingDown) {
+            log('QR', 'QR expirado, solicitando novo...');
+            reiniciarBot();
+        }
+    }, QR_REFRESH_MS);
+}
+
+async function gerarPairingCode(phone) {
+    try {
+        if (client && typeof client.requestPairingCode === 'function') {
+            const result = await client.requestPairingCode(phone);
+            return result?.pairingCode || result?.code || result || null;
+        }
+        const puppeteer = require('puppeteer');
+        const browser = await puppeteer.connect({ browserURL: 'http://127.0.0.1:9222' }).catch(() => null);
+        if (browser) {
+            const pages = await browser.pages();
+            const waPage = pages.find(p => p.url().includes('web.whatsapp.com'));
+            if (waPage) {
+                const code = await waPage.evaluate((phone) => {
+                    return new Promise((resolve) => {
+                        if (typeof window.Store?.Lid?.requestPairingCode === 'function') {
+                            window.Store.Lid.requestPairingCode(phone).then(resolve).catch(() => resolve(null));
+                        } else {
+                            resolve(null);
+                        }
+                    });
+                }, phone);
+                if (code) return code;
+            }
+            await browser.disconnect();
+        }
+        return null;
+    } catch (e) {
+        log('Aviso', 'Pairing code', errMsg(e));
+        return null;
+    }
+}
 
 async function listGroups() {
     const c = getClient();
@@ -311,8 +508,6 @@ async function listGroups() {
         return gs;
     } catch (e) { gruposCache.building = false; throw e; }
 }
-
-// ─── WHATSAPP SEND MESSAGE ─────────────────────────────────────────────────
 
 async function enviarMsg(grupo, mensagem, meta = {}) {
     const grupoId = meta.grupoId || '';
@@ -353,128 +548,24 @@ async function enviarMsg(grupo, mensagem, meta = {}) {
     } catch (e) { return { ok: false, msg: errMsg(e) }; }
 }
 
-// ─── CHROME AUTOINSTALL ────────────────────────────────────────────────────
-
-async function ensureChrome() {
-    const { execSync } = require('child_process');
-    const cacheDir = process.env.PUPPETEER_CACHE_DIR || '/opt/render/.cache/puppeteer';
-    mkdir(cacheDir);
-    try {
-        const pp = require('puppeteer');
-        const exe = pp.executablePath();
-        if (exe && fs.existsSync(exe)) { log('Info', `Chrome: ${exe}`); return; }
-    } catch {}
-    log('Info', 'Chrome não encontrado. Instalando...');
-    try {
-        execSync('npx --no-install puppeteer browsers install chrome', {
-            stdio: 'inherit', cwd: __dirname, timeout: 180000,
-        });
-        log('Info', 'Chrome instalado.');
-    } catch (e) {
-        log('Erro', 'Falha instalar Chrome (tentando via @puppeteer/browsers)...');
+function scheduleAll() {
+    Object.values(scheduledJobs).forEach(j => j.stop());
+    scheduledJobs = {};
+    config = normCfg(config);
+    const ativos = config.agendamentos.filter(a => a.ativo && a.grupo && a.mensagem && a.cron);
+    log('Cron', `Reagendando ${ativos.length}/${config.agendamentos.length}`);
+    config.agendamentos.forEach(a => {
+        if (!a.ativo || !a.grupo || !a.mensagem || !a.cron) return;
         try {
-            const pb = require('@puppeteer/browsers');
-            const cacheDir2 = process.env.PUPPETEER_CACHE_DIR || '/opt/render/.cache/puppeteer';
-            const installed = await pb.install({
-                browser: 'chrome', buildId: '148.0.7778.97',
-                cacheDir: cacheDir2, unpack: true,
-            });
-            log('Info', `Chrome instalado: ${installed.path}`);
-        } catch (e2) {
-            log('Erro', 'Falha instalar Chrome (tentando npx fallback)...');
-            try {
-                execSync('npx @puppeteer/browsers install chrome@148.0.7778.97 --path ' + cacheDir, {
-                    stdio: 'inherit', cwd: __dirname, timeout: 180000,
-                });
-            } catch (e3) {
-                log('Erro', 'Falha instalar Chrome', errMsg(e3));
-                throw e3;
-            }
-        }
-    }
+            scheduledJobs[a.id] = cron.schedule(a.cron, async () => {
+                if (!a.ativo) return;
+                log('Cron', `Disparo: "${a.grupo}"`);
+                const r = await enviarMsg(a.grupo, a.mensagem, { origem: 'cron', grupoId: a.grupoId });
+                log(r.ok ? 'Cron' : 'Erro', `Disparo ${a.grupo}: ${r.ok ? 'OK' : r.msg}`);
+            }, { timezone: BRASILIA_TZ });
+        } catch (e) { log('Erro', `Cron inválido ${a.id}`, errMsg(e)); }
+    });
 }
-
-// ─── WHATSAPP CLIENT (wppconnect) ─────────────────────────────────────────
-
-async function iniciarBot() {
-    if (client) return;
-    initialSyncDone = false;
-    setState('connecting', 'Iniciando WhatsApp...');
-    mkdir(TOKEN_DIR);
-    log('Info', `Tokens: ${TOKEN_DIR}`);
-    try {
-        await ensureChrome();
-        const wpp = await wppconnect.create({
-            session: 'whatsapp-bot',
-            headless: true,
-            useChrome: false,
-            disableWelcome: true,
-            logQR: false,
-            autoClose: 0,
-            deviceName: 'WA Bot',
-            folderNameToken: TOKEN_DIR,
-            browserArgs: [
-                '--no-sandbox',
-                '--disable-setuid-sandbox',
-                '--disable-gpu',
-                '--disable-dev-shm-usage',
-                '--disable-software-rasterizer',
-                '--no-first-run',
-                '--no-zygote',
-            ],
-            onStateChange: (state) => {
-                log('Estado', `WhatsApp: ${state}`);
-                if (state === 'CONNECTED' || state === 'isLogged') {
-                    qrDataURL = null;
-                    setState('ready', 'Conectado');
-                    botConnected = true;
-                    restarting = false;
-                    if (!initialSyncDone) {
-                        initialSyncDone = true;
-                        invalCache();
-                        scheduleAll();
-                        listGroups().catch(() => {});
-                    }
-                }
-                if (state === 'QRCode') {
-                    setState('qr', 'Aguardando escaneamento...');
-                    botConnected = false;
-                    restarting = false;
-                }
-                if (state === 'DISCONNECTED' || state === 'CONFLICT' || state === 'UNPAIRED' || state === 'UNPAIRED_IDLE') {
-                    botConnected = false;
-                    qrDataURL = null;
-                    if (state === 'CONFLICT') log('Erro', 'Outro dispositivo usando a conta. Aguardando...');
-                }
-            },
-            onQRCode: async (qr) => {
-                try {
-                    qrDataURL = await qrcode.toDataURL(qr);
-                    log('QR', 'Novo QR Code — escaneie no painel.');
-                } catch (e) { log('Erro', 'Falha QR', errMsg(e)); }
-            },
-        });
-
-        client = wpp;
-
-        wpp.onAck(async (ack) => {
-            const id = ack?.id || ack?._serialized || '';
-            const status = ack?.status ?? ack?.ack ?? -1;
-            const cb = pendingAcks[id];
-            if (cb) cb(status);
-        });
-
-        wpp.onParticipantsChanged(async () => { invalCache(); });
-
-        log('Bot', 'Aguardando conexão...');
-    } catch (e) {
-        log('Erro', 'Falha iniciar bot', errMsg(e));
-        client = null;
-        restarting = false;
-    }
-}
-
-// ─── MCP ───────────────────────────────────────────────────────────────────
 
 const mcpAuth = (req, res, next) => {
     if (!MCP_AUTH_TOKEN) return res.status(503).json({ ok: false, error: 'MCP_AUTH_TOKEN não configurado.' });
@@ -603,8 +694,8 @@ async function callMcp(name, args = {}) {
         case 'listar_logs': return logs.slice(0, Math.min(Math.max(Number(a.limite || 50), 1), 300));
         case 'salvar_sessao': await saveSessionRemote(); log('MCP', 'Sessão salva.'); return { ok: true };
         case 'restaurar_sessao': setTimeout(async () => { try { await restoreSessionRemote(); } catch (e) { log('Erro', 'Restore', errMsg(e)); setState('error', 'Erro restore'); restarting = false; } }, 300); return { ok: true, msg: 'Restauração iniciada' };
-        case 'excluir_sessao': await delSessionRemote(); await rmrf(TOKEN_DIR); setTimeout(async () => { try { await stopBot(true); await wait(1500); await iniciarBot(); } catch (e) { log('Erro', 'Reinício', errMsg(e)); setState('error', 'Erro reinício'); restarting = false; } }, 300); return { ok: true, msg: 'Sessão limpa' };
-        case 'atualizar_sessao_e_grupos': setTimeout(async () => { try { await stopBot(true); await wait(1500); await iniciarBot(); } catch (e) { log('Erro', 'Reinício', errMsg(e)); setState('error', 'Erro reinício'); restarting = false; } }, 300); return { ok: true, msg: 'Reinício iniciado' };
+        case 'excluir_sessao': await delSessionRemote(); await rmrf(TOKEN_DIR); setTimeout(async () => { try { await pararBot(true); await wait(1500); await iniciarBot(); } catch (e) { log('Erro', 'Reinício', errMsg(e)); setState('error', 'Erro reinício'); restarting = false; } }, 300); return { ok: true, msg: 'Sessão limpa' };
+        case 'atualizar_sessao_e_grupos': setTimeout(async () => { try { await pararBot(true); await wait(1500); await iniciarBot(); } catch (e) { log('Erro', 'Reinício', errMsg(e)); setState('error', 'Erro reinício'); restarting = false; } }, 300); return { ok: true, msg: 'Reinício iniciado' };
         default: throw new Error(`Ferramenta desconhecida: ${name}`);
     }
 }
@@ -613,15 +704,13 @@ const handleMcp = async payload => {
     if (!payload || typeof payload !== 'object') return { jsonrpc: '2.0', id: null, error: { code: -32600, message: 'Inválido' } };
     const id = payload.id ?? null;
     try {
-        if (payload.method === 'initialize') return { jsonrpc: '2.0', id, result: { protocolVersion: payload.params?.protocolVersion || '2024-11-05', capabilities: { tools: {} }, serverInfo: { name: 'bot-whatsapp-mcp', version: '3.0' } } };
+        if (payload.method === 'initialize') return { jsonrpc: '2.0', id, result: { protocolVersion: payload.params?.protocolVersion || '2024-11-05', capabilities: { tools: {} }, serverInfo: { name: 'bot-whatsapp-mcp', version: '4.0' } } };
         if (payload.method === 'notifications/initialized') return null;
         if (payload.method === 'tools/list') return { jsonrpc: '2.0', id, result: { tools: mcpTools() } };
         if (payload.method === 'tools/call') { const r = await callMcp(payload.params.name, payload.params.arguments); return { jsonrpc: '2.0', id, result: mcpR(r) }; }
         return { jsonrpc: '2.0', id, error: { code: -32601, message: `Método não suportado: ${payload.method}` } };
     } catch (e) { return { jsonrpc: '2.0', id, result: mcpR({ ok: false, error: errMsg(e) }, true) }; }
 };
-
-// ─── API ROUTES ────────────────────────────────────────────────────────────
 
 app.get('/api/health', (req, res) => res.json({ ok: true, service: 'wa-bot', uptime: Math.floor(process.uptime()), state: botState, connected: botConnected, mcpConfigured: Boolean(MCP_AUTH_TOKEN) }));
 app.get('/health', (req, res) => res.redirect('/api/health'));
@@ -637,7 +726,14 @@ app.post(MCP_ENDPOINT, mcpAuth, async (req, res) => {
     } catch (e) { res.status(500).json({ jsonrpc: '2.0', id: null, error: { code: -32000, message: errMsg(e) } }); }
 });
 
-app.get('/api/status', (req, res) => res.json({ connected: botConnected, state: botState, status: botStatus, restarting, qr: qrDataURL, supabaseConfigured: Boolean(supabase), uptimeSeconds: Math.floor(process.uptime()), startedAt: STARTED_AT.toISOString(), gruposCacheValido: Boolean(gruposCache.list), gruposCacheTotal: gruposCache.list?.length || 0 }));
+app.get('/api/status', (req, res) => res.json({
+    connected: botConnected, state: botState, status: botStatus, restarting,
+    qr: qrDataURL,
+    supabaseConfigured: Boolean(supabase),
+    uptimeSeconds: Math.floor(process.uptime()), startedAt: STARTED_AT.toISOString(),
+    gruposCacheValido: Boolean(gruposCache.list), gruposCacheTotal: gruposCache.list?.length || 0,
+}));
+
 app.get('/api/config', (req, res) => res.json(config));
 app.post('/api/config', async (req, res) => {
     try { config = normCfg(req.body); saveCfg(config); try { await saveCfgRemote(); } catch (e) { log('Erro', 'Supabase', errMsg(e)); } if (botConnected) scheduleAll(); res.json({ ok: true }); }
@@ -656,6 +752,30 @@ app.post('/api/agendamento', async (req, res) => {
         if (botConnected) scheduleAll();
         res.json({ ok: true, agendamento: ag });
     } catch (e) { res.status(500).json({ ok: false, msg: errMsg(e) }); }
+});
+
+app.post('/api/pairing-code', async (req, res) => {
+    try {
+        const phone = String(req.body?.phone || '').replace(/\D/g, '');
+        if (!phone || phone.length < 10 || phone.length > 15) {
+            return res.status(400).json({ ok: false, msg: 'Número inválido. Use código do país + DDD + número (5511999999999).' });
+        }
+        if (!client) {
+            return res.status(503).json({ ok: false, msg: 'WhatsApp não inicializado. Aguarde o bot conectar.' });
+        }
+        if (botConnected) {
+            return res.status(400).json({ ok: false, msg: 'Bot já conectado. Não é necessário emparelhar.' });
+        }
+        const code = await gerarPairingCode(phone);
+        if (code) {
+            log('Pairing', `Código gerado para ${phone}`);
+            res.json({ ok: true, code });
+        } else {
+            res.status(501).json({ ok: false, msg: 'Emparelhamento não suportado nesta versão. Use o QR Code no painel ou atualize o wppconnect para v2.' });
+        }
+    } catch (e) {
+        res.status(500).json({ ok: false, msg: errMsg(e) });
+    }
 });
 
 app.get('/api/predefinidas', async (req, res) => { const d = await loadPredefRemote(); res.json(d); });
@@ -695,11 +815,11 @@ app.post('/api/session/save', async (req, res) => {
     try { await saveSessionRemote(); res.json({ ok: true }); } catch (e) { res.status(500).json({ ok: false, msg: errMsg(e) }); }
 });
 app.post('/api/session/delete', async (req, res) => {
-    try { await delSessionRemote(); await rmrf(TOKEN_DIR); res.json({ ok: true, msg: 'Sessão limpa' }); setTimeout(async () => { try { await stopBot(true); await wait(1500); await iniciarBot(); } catch (e) {} }, 300); }
+    try { await delSessionRemote(); await rmrf(TOKEN_DIR); res.json({ ok: true, msg: 'Sessão limpa' }); setTimeout(async () => { try { await pararBot(true); await wait(1500); await iniciarBot(); } catch (e) {} }, 300); }
     catch (e) { res.status(500).json({ ok: false, msg: errMsg(e) }); }
 });
 app.post('/api/session/restart', async (req, res) => {
-    try { res.json({ ok: true, msg: 'Reiniciando...' }); setTimeout(async () => { try { await stopBot(true); await wait(1500); await iniciarBot(); } catch (e) {} }, 300); }
+    try { res.json({ ok: true, msg: 'Reiniciando...' }); setTimeout(async () => { try { await pararBot(true); await wait(1500); await iniciarBot(); } catch (e) {} }, 300); }
     catch (e) { res.status(500).json({ ok: false, msg: errMsg(e) }); }
 });
 app.post('/api/session/restore', async (req, res) => {
@@ -714,7 +834,19 @@ app.listen(PORT, () => {
     log('Servidor', `MCP: ${MCP_ENDPOINT} ${MCP_AUTH_TOKEN ? '(token)' : '(desativado)'}`);
 });
 
-// ─── BOOT ──────────────────────────────────────────────────────────────────
+process.on('SIGTERM', async () => {
+    log('Sistema', 'SIGTERM recebido, encerrando...');
+    shuttingDown = true;
+    await pararBot(false);
+    setTimeout(() => process.exit(0), 2000);
+});
+
+process.on('SIGINT', async () => {
+    log('Sistema', 'SIGINT recebido, encerrando...');
+    shuttingDown = true;
+    await pararBot(false);
+    setTimeout(() => process.exit(0), 1000);
+});
 
 async function bootstrap() {
     await loadCfgRemote();
