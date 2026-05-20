@@ -300,7 +300,7 @@ async function listGroups() {
     try {
         if (!getClient()) { gruposCache.building = false; return []; }
         const map = await client.groupFetchAllParticipating();
-        const num = client.user?.id?.split(':')[0]?.split('@')[0] || '';
+        const num = client.authState?.creds?.me?.id?.split(':')[0]?.split('@')[0] || '';
         const gs = Object.entries(map).filter(([jid, m]) => !num || m.participants?.some(p => (p.id?.split(':')[0]?.split('@')[0] || '') === num)).map(([jid, m]) => ({ nome: m.subject || 'Sem nome', id: jid })).sort((a, b) => a.nome.localeCompare(b.nome));
         if (initialSyncDone || gs.length > 0) gruposCache = { list: gs, at: Date.now(), building: false };
         else { gruposCache = { list: null, at: 0, building: false }; log('Aviso', 'groupFetchAllParticipating() vazio — sync pendente.'); }
@@ -330,7 +330,7 @@ async function enviarMsg(grupo, mensagem, meta = {}) {
         }
         try {
             const meta = await client.groupMetadata(destId);
-            const num = client.user?.id?.split(':')[0]?.split('@')[0] || '';
+            const num = client.authState?.creds?.me?.id?.split(':')[0]?.split('@')[0] || '';
             if (num && meta.participants?.length) {
                 const inGroup = meta.participants.some(p => (p.id?.split(':')[0]?.split('@')[0] || '') === num);
                 if (!inGroup) return { ok: false, msg: `Bot removido do grupo "${meta.subject || destNome}"` };
@@ -385,7 +385,8 @@ async function iniciarBot() {
             }
 
             if (connection === 'open') {
-                if (sock.authState?.creds?.registered === true) {
+                const hasAuth = sock.authState?.creds?.me?.id;
+                if (hasAuth) {
                     log('Bot', 'Conectado com sucesso!');
                     qrDataURL = null;
                     setState('ready', 'Conectado');
@@ -396,7 +397,7 @@ async function iniciarBot() {
                     scheduleAll();
                     listGroups().catch(() => {});
                 } else {
-                    log('Aviso', 'Conexão aberta sem registro. Limpando...');
+                    log('Aviso', 'Conexão aberta sem auth (me.id ausente). Limpando...');
                     qrDataURL = null;
                     botConnected = false;
                     client = null;
@@ -410,7 +411,7 @@ async function iniciarBot() {
                 const logout = code === DisconnectReason.loggedOut;
                 const restartReq = code === DisconnectReason.restartRequired;
                 const inQr = botState === 'qr' || qrDataURL !== null;
-                const paired = authDone || sock.authState?.creds?.registered === true;
+                const paired = authDone || sock.authState?.creds?.me?.id;
                 botConnected = false;
                 qrDataURL = null;
 
@@ -434,7 +435,7 @@ async function iniciarBot() {
 
         sock.ev.on('creds.update', up => {
             saveCreds(up);
-            if (up.registered === true) authDone = true;
+            if (up.me?.id) authDone = true;
         });
 
         sock.ev.on('messages.update', updates => {
