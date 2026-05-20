@@ -1,179 +1,5 @@
-<!DOCTYPE html>
-<html lang="pt-BR">
-<head>
-<meta charset="UTF-8"/>
-<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-<title>WA Bot Baileys — Painel</title>
-<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
 <script>
-  tailwind.config = {
-    theme: {
-      extend: {
-        fontFamily: { sans: ['Inter', 'system-ui', 'sans-serif'], mono: ['Space Mono', 'monospace'] },
-        colors: {
-          ink: '#061018', panel: '#0b1420', panel2: '#101c2a', line: '#20344a', muted: '#90a4b8', wa: '#25d366', skywa: '#53bdeb', danger: '#ff5c7a', warn: '#ffd166'
-        },
-        boxShadow: { soft: '0 24px 80px rgba(0,0,0,.38)' }
-      }
-    }
-  }
-</script>
-<link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css" rel="stylesheet"/>
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet"/>
-<style>
-*{box-sizing:border-box}
-body{min-height:100vh;background:radial-gradient(circle at 12% 0%,#14344c 0,#071018 34%,#04080d 100%);color:#e8f0f8;font-family:Inter,system-ui,sans-serif}
-body::before{content:"";position:fixed;inset:0;background-image:linear-gradient(#ffffff05 1px,transparent 1px),linear-gradient(90deg,#ffffff05 1px,transparent 1px);background-size:32px 32px;pointer-events:none}
-.app-shell{position:relative;z-index:1;max-width:1440px;margin:0 auto;padding:24px}
-.panel-card{background:linear-gradient(180deg,rgba(15,25,38,.92),rgba(8,15,24,.96));border:1px solid #20344a;border-radius:24px;box-shadow:0 24px 80px rgba(0,0,0,.35)}
-.section-title,.form-label{font-size:.74rem;text-transform:uppercase;letter-spacing:.1em;font-weight:900;color:#90a4b8;margin:0}
-.muted{color:#90a4b8}.mono{font-family:'Space Mono',monospace}
-.form-control,.form-select{width:100%;background:#071018;border:1px solid #20344a;color:#e8f0f8;border-radius:14px;padding:11px 14px;outline:none;min-height:46px}
-.form-control:focus,.form-select:focus{border-color:#25d366;box-shadow:0 0 0 4px rgba(37,211,102,.12)}
-.form-control::placeholder{color:#6f8295}textarea.form-control{min-height:auto}
-.btn{display:inline-flex;align-items:center;justify-content:center;gap:.45rem;border-radius:14px;font-weight:900;min-height:44px;padding:.65rem 1rem;transition:.18s;white-space:nowrap}
-.btn-sm{min-height:34px;padding:.45rem .7rem;font-size:.82rem;border-radius:11px}
-.btn-wa{background:#25d366;color:#05220f;border:1px solid #25d366}.btn-wa:hover{filter:brightness(1.08)}
-.btn-soft{background:#101c2a;color:#e8f0f8;border:1px solid #20344a}.btn-soft:hover{border-color:#25d366;color:#25d366}
-.btn-danger-soft{background:rgba(255,92,122,.11);color:#ff5c7a;border:1px solid rgba(255,92,122,.55)}.btn-danger-soft:hover{background:#ff5c7a;color:white}
-.badge-soft{display:inline-flex;gap:.45rem;align-items:center;background:#101c2a;border:1px solid #20344a;color:#90a4b8;border-radius:999px;padding:.45rem .7rem;font-weight:800;font-size:.82rem}
-.status-pill{display:inline-flex;align-items:center;gap:8px;padding:8px 12px;border:1px solid #20344a;border-radius:999px;color:#90a4b8;font-size:.82rem;font-weight:900;background:#071018}
-.status-dot{width:9px;height:9px;border-radius:99px;background:#90a4b8}.status-pill.connected{color:#25d366;border-color:#25d36680;background:#25d3661f}.status-pill.connected .status-dot{background:#25d366;box-shadow:0 0 12px #25d366}.status-pill.qr{color:#ffd166;border-color:#ffd16680;background:#ffd16618}.status-pill.qr .status-dot{background:#ffd166}
-#qr-img{width:220px;height:220px;border-radius:20px;border:5px solid white;background:white;padding:8px}.qr-placeholder{width:220px;height:220px;border:1px dashed #20344a;border-radius:20px;display:flex;flex-direction:column;align-items:center;justify-content:center;color:#90a4b8;text-align:center;background:#071018}.qr-placeholder i{font-size:42px;opacity:.55}.connected-state{display:none;text-align:center}.connected-state i{font-size:58px;color:#25d366}
-.logs-box{height:300px;overflow:auto;background:#071018;border:1px solid #20344a;border-radius:20px;padding:14px}.log-entry{display:grid;grid-template-columns:72px 82px minmax(0,1fr);gap:8px;font-size:.78rem;line-height:1.45;padding:2px 0}.log-time,.log-type{font-family:'Space Mono',monospace}.log-time{color:#90a4b8}.log-type.Sucesso{color:#25d366}.log-type.Erro{color:#ff5c7a}.log-type.Aviso{color:#ffd166}.log-type.Bot,.log-type.WhatsApp{color:#53bdeb}.log-type.Cron{color:#d99cff}.log-type.Sessão{color:#9fe870}.log-type.Config,.log-type.Logs{color:#ffd166}.log-type.Debug{color:#94a3b8}
-.log-controls{display:flex;gap:8px;flex-wrap:wrap;align-items:center}.log-controls .form-select,.log-controls .form-control{width:auto;min-width:118px;padding:7px 10px;border-radius:11px;font-size:.82rem;min-height:36px}
-.ag-card{background:#071018;border:1px solid #20344a;border-radius:24px;padding:18px}.ag-card.active{border-color:#25d36680;box-shadow:0 0 0 4px #25d3661c}.ag-card.collapsed .ag-body{display:none}.ag-summary{display:flex;align-items:center;justify-content:space-between;gap:14px;flex-wrap:wrap;margin-bottom:16px}.ag-summary-left{display:flex;align-items:center;gap:12px;min-width:0}.ag-group-title{font-weight:900;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:520px}.group-id-line,.group-select-help{font-family:'Space Mono',monospace;color:#6f8396;font-size:.72rem;word-break:break-all}.group-id-line{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:620px}.status-mini{display:inline-flex;align-items:center;gap:6px;border-radius:999px;padding:6px 11px;font-size:.82rem;font-weight:900;border:1px solid #20344a}.status-mini.active{background:#25d3661f;color:#25d366}.status-mini.inactive{background:#ffd1661f;color:#ffd166}
-.days-grid{display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:8px}.day-check input{display:none}.day-check span{display:flex;align-items:center;justify-content:center;min-height:40px;border:1px solid #20344a;border-radius:13px;color:#90a4b8;font-weight:900;background:#0d1722;cursor:pointer;padding:0 .7rem}.day-check input:checked+span{background:#25d366;color:#05220f;border-color:#25d366}
-.ag-day-filter{display:flex;gap:6px;flex-wrap:wrap}.ag-day-filter .day-check span{min-height:36px;min-width:48px;font-size:.8rem}
-.format-toolbar{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px}.whatsapp-preview{background:#0b141a;border:1px solid #20344a;border-radius:22px;overflow:hidden}.wa-top{min-height:56px;background:#202c33;display:flex;align-items:center;gap:10px;padding:8px 14px}.wa-avatar{width:32px;height:32px;border-radius:50%;background:#6b7c86;display:flex;align-items:center;justify-content:center;color:white;flex:0 0 auto}.wa-chat{min-height:214px;padding:18px;background-color:#0b141a;background-image:radial-gradient(#ffffff08 1px,transparent 1px);background-size:16px 16px}.wa-bubble{max-width:88%;margin-left:auto;background:#005c4b;color:#e9edef;border-radius:14px 0 14px 14px;padding:12px 14px;white-space:pre-wrap;font-size:.94rem;line-height:1.48;word-break:break-word}.wa-empty{color:#81929d;font-style:italic}.wa-time{text-align:right;color:#b7c8d0;font-size:.68rem;margin-top:6px}.predef-list{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px}.predef-card{background:#071018;border:1px solid #20344a;border-radius:16px;padding:14px;cursor:pointer;transition:.18s}.predef-card:hover{border-color:#25d366;transform:translateY(-1px)}.predef-title{font-weight:900;margin-bottom:6px}.predef-preview{color:#90a4b8;font-size:.82rem;line-height:1.4;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
-.toast-custom{position:fixed;right:24px;bottom:24px;z-index:70;background:#25d366;color:#05220f;border-radius:14px;padding:12px 16px;font-weight:900;transform:translateY(80px);opacity:0;transition:.25s}.toast-custom.show{transform:translateY(0);opacity:1}
-.alert{border-radius:16px;padding:12px 14px;border:1px solid #20344a;background:#101c2a;color:#e8f0f8}.alert-danger{border-color:#ff5c7a70;background:#ff5c7a14;color:#ffc2ce}.alert-success{border-color:#25d36680;background:#25d36617;color:#bbf7d0}.alert-info{border-color:#53bdeb80;background:#53bdeb14;color:#d6f1ff}.alert-dark{background:#071018;color:#e8f0f8}.d-none{display:none!important}.small{font-size:.84rem}.fw-bold{font-weight:800}.fw-black{font-weight:900}.h3{font-size:1.875rem;line-height:2.25rem}.h5{font-size:1.125rem;line-height:1.75rem}.mb-0{margin-bottom:0}.mt-1{margin-top:.25rem}.mt-2{margin-top:.5rem}.mt-3{margin-top:.75rem}.mb-1{margin-bottom:.25rem}.mb-2{margin-bottom:.5rem}.mb-3{margin-bottom:.75rem}.mb-4{margin-bottom:1rem}.p-4{padding:1rem}.w-50{width:50%}.w-100{width:100%}
-.row{display:grid;grid-template-columns:repeat(12,minmax(0,1fr));gap:1rem}.g-3{gap:1rem}.g-4{gap:1.25rem}.col-12{grid-column:span 12 / span 12}.col-lg-2{grid-column:span 2 / span 2}.col-lg-3{grid-column:span 3 / span 3}.col-lg-4{grid-column:span 4 / span 4}.col-lg-5{grid-column:span 5 / span 5}.col-lg-6{grid-column:span 6 / span 6}.col-lg-7{grid-column:span 7 / span 7}.d-flex{display:flex}.align-items-end{align-items:flex-end}.align-items-center{align-items:center}.justify-content-center{justify-content:center}.justify-content-between{justify-content:space-between}.justify-content-end{justify-content:flex-end}.gap-2{gap:.5rem}.gap-3{gap:.75rem}.flex-wrap{flex-wrap:wrap}.vstack{display:flex;flex-direction:column}
-.modal-shell{position:fixed;inset:0;z-index:60;align-items:center;justify-content:center;background:rgba(0,0,0,.68);backdrop-filter:blur(8px);padding:18px}.modal-panel{width:min(720px,100%);max-height:90vh;overflow:auto;background:linear-gradient(180deg,#101c2a,#071018);border:1px solid #20344a;border-radius:24px;box-shadow:0 30px 120px rgba(0,0,0,.5)}.modal-head,.modal-foot{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:18px;border-bottom:1px solid #20344a}.modal-foot{border-top:1px solid #20344a;border-bottom:0;justify-content:flex-end}.modal-body{padding:18px}.btn-close-x{width:38px;height:38px;border:1px solid #20344a;background:#071018;border-radius:13px;color:#90a4b8}
-@media(max-width:1024px){.col-lg-2,.col-lg-3,.col-lg-4,.col-lg-5,.col-lg-6,.col-lg-7{grid-column:span 12/span 12}.app-shell{padding:16px}}
-@media(max-width:768px){.days-grid{grid-template-columns:repeat(4,minmax(0,1fr))}.log-entry{grid-template-columns:60px 70px minmax(0,1fr)}.ag-summary-left{align-items:flex-start}.ag-group-title{max-width:270px}}
-</style>
-</head>
-<body>
-<div class="app-shell">
-  <header class="mb-5 flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
-    <div class="flex items-center gap-4">
-      <div class="flex h-14 w-14 items-center justify-center rounded-2xl bg-wa text-2xl text-[#05220f] shadow-soft"><i class="bi bi-whatsapp"></i></div>
-      <div>
-        <h1 class="text-3xl font-black tracking-tight">WA Bot Baileys</h1>
-        <p class="mt-1 text-sm font-semibold text-muted">Painel pessoal de agendamentos em horário de Brasília</p>
-      </div>
-    </div>
-    <div class="flex flex-wrap items-center gap-2">
-      <span class="badge-soft"><i class="bi bi-clock"></i> Brasília</span>
-      <button class="btn btn-soft" onclick="showModal('sessionModal')"><i class="bi bi-database-check"></i> Sessão</button>
-      <div class="status-pill" id="status-pill"><span class="status-dot"></span><span id="status-text">Inicializando...</span></div>
-    </div>
-  </header>
-
-  <div class="grid gap-4 lg:grid-cols-12">
-    <section class="panel-card p-5 lg:col-span-4">
-      <div class="mb-5 flex items-center justify-between gap-3"><h2 class="section-title">Conexão WhatsApp</h2><span class="muted mono small" id="tz-info">America/Sao_Paulo</span></div>
-      <div class="flex min-h-[270px] items-center justify-center">
-        <div class="qr-placeholder" id="qr-placeholder"><i class="bi bi-qr-code-scan mb-2"></i><strong>Aguardando QR</strong><span class="small mt-1">O QR aparecerá aqui quando necessário.</span></div>
-        <img id="qr-img" alt="QR Code" style="display:none"/>
-        <div class="connected-state" id="connected-state"><i class="bi bi-check-circle-fill"></i><h3 class="h5 mt-2 mb-1">Bot conectado</h3><p class="muted mb-0">WhatsApp ativo e pronto para enviar mensagens.</p></div>
-      </div>
-      <div class="mt-4 text-center">
-        <button class="btn btn-soft btn-sm" onclick="openPairingModal()" id="btn-pairing"><i class="bi bi-phone-flip"></i> Emparelhar com código</button>
-        <div class="muted small mt-2">Alternativa ao QR Code usando Baileys.</div>
-      </div>
-    </section>
-
-    <section class="panel-card p-5 lg:col-span-8">
-      <div class="mb-4 flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between">
-        <h2 class="section-title">Logs em tempo real</h2>
-        <div class="log-controls">
-          <select class="form-select" id="log-type-filter" onchange="pollLogs(true)" title="Filtrar logs por tipo"><option value="">Todos</option><option value="Erro">Erro</option><option value="Aviso">Aviso</option><option value="Sucesso">Sucesso</option><option value="Sessão">Sessão</option><option value="WhatsApp">WhatsApp</option><option value="Debug">Debug</option><option value="Bot">Bot</option><option value="Cron">Cron</option><option value="Sistema">Sistema</option><option value="Logs">Logs</option></select>
-          <select class="form-select" id="log-limit-filter" onchange="pollLogs(true)" title="Limite de logs"><option value="50">50</option><option value="100" selected>100</option><option value="180">180</option><option value="300">300</option></select>
-          <input class="form-control" id="log-text-filter" placeholder="Buscar log" oninput="pollLogs(true)">
-          <button class="btn btn-soft btn-sm" onclick="copyLogs()"><i class="bi bi-copy"></i> Copiar</button>
-        </div>
-      </div>
-      <div class="logs-box" id="logs-box"><div class="log-entry"><span class="log-time">--:--</span><span class="log-type">Info</span><span>Aguardando conexão...</span></div></div>
-    </section>
-  </div>
-
-  <section class="panel-card mt-4 p-5">
-    <div class="mb-5 flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">
-      <div>
-        <h2 class="section-title">Agendamentos</h2>
-        <p class="muted small mt-2">Selecione grupos, horários e dias da semana. O cron é gerado automaticamente.</p>
-      </div>
-      <div class="flex flex-col gap-3 xl:items-end">
-        <div class="flex flex-wrap items-center gap-2">
-          <input class="form-control min-w-[260px]" id="ag-filter" placeholder="Filtrar por grupo" oninput="renderAgs()">
-          <button class="btn btn-soft" onclick="setAllActive(false)"><i class="bi bi-pause-fill"></i> Pausar</button>
-          <button class="btn btn-soft" onclick="setAllActive(true)"><i class="bi bi-play-fill"></i> Ativar</button>
-          <button class="btn btn-soft" onclick="addAg()"><i class="bi bi-plus-lg"></i> Novo</button>
-          <button class="btn btn-wa" onclick="saveConfig()"><i class="bi bi-save"></i> Salvar tudo</button>
-        </div>
-        <div class="ag-day-filter" title="Filtrar agendamentos por um ou mais dias">
-          <label class="day-check"><input type="checkbox" onchange="toggleAgFilterDay(1,this.checked)"><span>Seg</span></label><label class="day-check"><input type="checkbox" onchange="toggleAgFilterDay(2,this.checked)"><span>Ter</span></label><label class="day-check"><input type="checkbox" onchange="toggleAgFilterDay(3,this.checked)"><span>Qua</span></label><label class="day-check"><input type="checkbox" onchange="toggleAgFilterDay(4,this.checked)"><span>Qui</span></label><label class="day-check"><input type="checkbox" onchange="toggleAgFilterDay(5,this.checked)"><span>Sex</span></label><label class="day-check"><input type="checkbox" onchange="toggleAgFilterDay(6,this.checked)"><span>Sáb</span></label><label class="day-check"><input type="checkbox" onchange="toggleAgFilterDay(0,this.checked)"><span>Dom</span></label><button class="btn btn-soft btn-sm" onclick="clearAgDayFilter()"><i class="bi bi-x-lg"></i></button>
-        </div>
-      </div>
-    </div>
-    <div class="vstack gap-3" id="ag-list"></div>
-  </section>
-
-  <section class="panel-card mt-4 p-5">
-    <div class="mb-4 flex items-center justify-between gap-3"><div><h2 class="section-title">Mensagens predefinidas</h2><p class="muted small mt-2">Crie mensagens para reutilizar nos agendamentos.</p></div><button class="btn btn-soft" onclick="openPredefModal()"><i class="bi bi-plus-lg"></i> Nova</button></div>
-    <div class="predef-list" id="predef-list"><div class="muted small">Carregando predefinidas...</div></div>
-  </section>
-
-  <section class="panel-card mt-4 p-5 mb-6">
-    <div class="mb-4 flex items-center justify-between gap-3"><h2 class="section-title">Envio manual</h2><span class="muted small">Preview estilo WhatsApp</span></div>
-    <div class="grid gap-5 lg:grid-cols-2">
-      <div>
-        <div class="mb-3"><label class="form-label">Grupo de destino</label><select class="form-select mt-2" id="manual-grupo-id" onchange="onManualGroupChange()"><option value="">Carregando grupos...</option></select><div class="group-select-help mt-2" id="manual-grupo-id-view">Selecione o grupo para usar o ID real do WhatsApp.</div></div>
-        <div class="mb-3"><label class="form-label">Mensagem</label><div class="format-toolbar mt-2"><button type="button" class="btn btn-soft btn-sm" onclick="wrapTextareaSelection('manual-msg','*','*')"><i class="bi bi-type-bold"></i></button><button type="button" class="btn btn-soft btn-sm" onclick="wrapTextareaSelection('manual-msg','_','_')"><i class="bi bi-type-italic"></i></button><button type="button" class="btn btn-soft btn-sm" onclick="wrapTextareaSelection('manual-msg','~','~')"><i class="bi bi-type-strikethrough"></i></button><button type="button" class="btn btn-soft btn-sm" onclick="wrapTextareaSelection('manual-msg','```','```')"><i class="bi bi-code-slash"></i></button><button type="button" class="btn btn-soft btn-sm" onclick="insertAtCursor('manual-msg','{saudacao}')">Saudação</button><button type="button" class="btn btn-soft btn-sm" onclick="insertAtCursor('manual-msg','{data}')">Data</button><button type="button" class="btn btn-soft btn-sm" onclick="insertAtCursor('manual-msg','{grupo}')">Grupo</button><button type="button" class="btn btn-soft btn-sm" onclick="openUsePredefModal('manual-msg')"><i class="bi bi-card-text"></i> Usar predefinida</button></div><textarea class="form-control" id="manual-msg" rows="7" placeholder="Digite sua mensagem aqui..."></textarea></div>
-        <button class="btn btn-wa w-100" id="btn-send" onclick="enviarManual()"><i class="bi bi-send-fill"></i> Enviar agora</button><div id="send-result" class="alert mt-3 d-none mb-0"></div>
-      </div>
-      <div class="whatsapp-preview"><div class="wa-top"><div class="wa-avatar"><i class="bi bi-people-fill"></i></div><div><div class="fw-bold" id="manual-preview-grupo">Grupo</div><div class="small muted">online</div></div></div><div class="wa-chat"><div class="wa-bubble" id="manual-preview"><span class="wa-empty">A mensagem aparecerá aqui...</span></div></div></div>
-    </div>
-  </section>
-</div>
-
-<div class="modal-shell hidden" id="sessionModal"><div class="modal-panel"><div class="modal-head"><div><h5 class="text-lg font-black">Gerenciar sessão do WhatsApp</h5><p class="muted small mt-1">Supabase Storage: salvar, excluir, restaurar ou atualizar a sessão Baileys local.</p></div><button class="btn-close-x" onclick="hideModal('sessionModal')"><i class="bi bi-x-lg"></i></button></div><div class="modal-body"><div class="alert alert-dark small mb-3"><div><strong>Status:</strong> <span id="supabase-status">Verificando...</span></div><div><strong>Arquivo:</strong> <span id="supabase-path" class="mono">-</span></div></div><div id="session-result" class="alert d-none"></div><div class="grid gap-2"><button class="btn btn-wa" onclick="sessionAction('save')"><i class="bi bi-cloud-arrow-up-fill"></i> Salvar Sessão</button><button class="btn btn-soft" onclick="sessionAction('restore')"><i class="bi bi-cloud-arrow-down-fill"></i> Restaurar</button><button class="btn btn-soft" onclick="sessionAction('restart')"><i class="bi bi-arrow-clockwise"></i> Atualizar sessão e grupos</button><button class="btn btn-danger-soft" onclick="sessionAction('delete')"><i class="bi bi-trash3-fill"></i> Excluir Sessão</button></div></div><div class="modal-foot"><button class="btn btn-soft" onclick="hideModal('sessionModal')">Fechar</button></div></div></div>
-
-<div class="modal-shell hidden" id="predefModal"><div class="modal-panel"><div class="modal-head"><div><h5 class="text-lg font-black" id="predef-modal-title">Nova mensagem predefinida</h5><p class="muted small mt-1">Salve blocos de texto para reaproveitar.</p></div><button class="btn-close-x" onclick="hideModal('predefModal')"><i class="bi bi-x-lg"></i></button></div><div class="modal-body"><input type="hidden" id="predef-id"><div class="mb-3"><label class="form-label">Título</label><input class="form-control mt-2" id="predef-title" placeholder="Ex: Aviso de culto"></div><div class="mb-3"><label class="form-label">Mensagem</label><textarea class="form-control mt-2" id="predef-message" rows="8" placeholder="Conteúdo da mensagem predefinida"></textarea></div><div id="predef-result" class="alert d-none mb-0"></div></div><div class="modal-foot"><button class="btn btn-danger-soft" id="btn-delete-predef" onclick="deletePredefAtual()"><i class="bi bi-trash3"></i> Excluir</button><button class="btn btn-soft" onclick="hideModal('predefModal')">Fechar</button><button class="btn btn-wa" onclick="savePredefAtual()"><i class="bi bi-save"></i> Salvar</button></div></div></div>
-
-<div class="modal-shell hidden" id="usePredefModal"><div class="modal-panel"><div class="modal-head"><h5 class="text-lg font-black">Usar predefinida</h5><button class="btn-close-x" onclick="hideModal('usePredefModal')"><i class="bi bi-x-lg"></i></button></div><div class="modal-body"><div id="use-predef-list" class="vstack gap-2"><div class="muted small">Carregando...</div></div></div></div></div>
-
-<div class="modal-shell hidden" id="pairingModal"><div class="modal-panel"><div class="modal-head"><div><h5 class="text-lg font-black">Emparelhar com código</h5><p class="muted small mt-1">Use o número com DDI e DDD, sem +. Ex: 5588999999999.</p></div><button class="btn-close-x" onclick="hideModal('pairingModal')"><i class="bi bi-x-lg"></i></button></div><div class="modal-body"><div class="mb-3"><label class="form-label">Número do WhatsApp</label><input class="form-control mt-2" id="pairing-phone" inputmode="numeric" placeholder="5588999999999"></div><div id="pairing-error" class="alert alert-danger d-none"></div><div id="pairing-result" class="alert alert-info d-none"></div></div><div class="modal-foot"><button class="btn btn-soft" onclick="hideModal('pairingModal')">Fechar</button><button class="btn btn-wa" id="btn-pairing-submit" onclick="gerarPairingCode()"><i class="bi bi-send"></i> Gerar código</button></div></div></div>
-
-<div id="toast" class="toast-custom">Salvo com sucesso</div>
-<script>
-
-function showModal(id) {
-  const el = document.getElementById(id);
-  if (!el) return;
-  el.classList.remove('hidden');
-  el.classList.add('flex');
-  document.body.classList.add('overflow-hidden');
-}
-function hideModal(id) {
-  const el = document.getElementById(id);
-  if (!el) return;
-  el.classList.add('hidden');
-  el.classList.remove('flex');
-  if (!document.querySelector('.modal-shell.flex')) document.body.classList.remove('overflow-hidden');
-}
-function setupModalBackdropClose() {
-  document.querySelectorAll('.modal-shell').forEach(modal => {
-    modal.addEventListener('click', e => {
-      if (e.target === modal) hideModal(modal.id);
-    });
-  });
-  document.addEventListener('keydown', e => {
-    if (e.key === 'Escape') document.querySelectorAll('.modal-shell.flex').forEach(m => hideModal(m.id));
-  });
-}
 let config = { agendamentos: [] };
 let grupos = [];
 let agFilterDays = new Set();
@@ -362,7 +188,7 @@ function openPredefModal(id = '') {
   const result = document.getElementById('predef-result');
   result.className = 'alert d-none mb-0';
   result.textContent = '';
-  showModal('predefModal');
+  bootstrap.Modal.getOrCreateInstance(document.getElementById('predefModal')).show();
 }
 
 async function savePredefAtual() {
@@ -384,7 +210,7 @@ async function savePredefAtual() {
   }
   predefinidas = d.predefinidas || predefinidas;
   renderPredefinidas();
-  hideModal('predefModal');
+  bootstrap.Modal.getOrCreateInstance(document.getElementById('predefModal')).hide();
   showToast('Predefinida salva');
 }
 
@@ -401,7 +227,7 @@ async function deletePredefAtual() {
   }
   predefinidas = d.predefinidas || [];
   renderPredefinidas();
-  hideModal('predefModal');
+  bootstrap.Modal.getOrCreateInstance(document.getElementById('predefModal')).hide();
   showToast('Predefinida excluída');
 }
 
@@ -418,7 +244,7 @@ function openUsePredefModal(textareaId) {
       </button>
     `).join('');
   }
-  showModal('usePredefModal');
+  bootstrap.Modal.getOrCreateInstance(document.getElementById('usePredefModal')).show();
 }
 
 function usePredefinida(id) {
@@ -427,7 +253,7 @@ function usePredefinida(id) {
   if (!item || !el) return;
   el.value = item.mensagem || '';
   dispatchInput(el);
-  hideModal('usePredefModal');
+  bootstrap.Modal.getOrCreateInstance(document.getElementById('usePredefModal')).hide();
   showToast('Predefinida aplicada');
 }
 
@@ -950,7 +776,7 @@ function openPairingModal() {
   document.getElementById('pairing-error').classList.add('d-none');
   document.getElementById('btn-pairing-submit').disabled = false;
   document.getElementById('btn-pairing-submit').innerHTML = '<i class="bi bi-send"></i> Gerar código';
-  showModal('pairingModal');
+  bootstrap.Modal.getOrCreateInstance(document.getElementById('pairingModal')).show();
   setTimeout(() => document.getElementById('pairing-phone').focus(), 300);
 }
 
@@ -980,31 +806,3 @@ async function gerarPairingCode() {
     });
     const d = await r.json();
     if (!r.ok || d.ok === false) {
-      error.className = 'alert alert-danger';
-      error.textContent = d.msg || 'Erro ao gerar código.';
-      error.classList.remove('d-none');
-      return;
-    }
-    document.getElementById('pairing-code-display').textContent = d.code;
-    result.classList.remove('d-none');
-  } catch (e) {
-    error.className = 'alert alert-danger';
-    error.textContent = `Erro de conexão: ${e.message}`;
-    error.classList.remove('d-none');
-  } finally {
-    btn.disabled = false;
-    btn.innerHTML = '<i class="bi bi-send"></i> Gerar código';
-  }
-}
-
-setupModalBackdropClose();
-pollStatus();
-pollLogs();
-loadConfig();
-loadGrupos();
-loadPredefinidas();
-updateManualPreview();
-
-</script>
-</body>
-</html>

@@ -49,3 +49,13 @@ SESSION_AUTOSAVE_MS=60000
 ## Fluxo correto após instalar
 
 Se já havia sessão quebrada, escaneie o QR novamente. A versão antiga restaurava sessão inválida do Supabase e entrava em loop de `401`; esta versão remove esse backup ruim quando detectar erro de autenticação.
+
+
+## v11 — Painel Tailwind
+
+- Frontend migrado para Tailwind CDN no `public/index.html`.
+- Bootstrap CSS/JS removido; Bootstrap Icons mantido apenas para os ícones.
+- Modais agora usam JavaScript vanilla (`showModal` / `hideModal`).
+- Layout reorganizado com grid mais simétrico para logs, agendamentos, envio manual e preview.
+- Mantidos filtros de log por tipo/limite/busca e filtro de agendamentos por múltiplos dias da semana.
+- Mantida rotina de limpeza automática de logs via `LOG_AUTO_CLEAR_HOURS`, padrão 12h.

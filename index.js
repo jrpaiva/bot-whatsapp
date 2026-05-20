@@ -211,7 +211,12 @@ process.on('unhandledRejection', e => { log('Erro', 'Rejeição', errMsg(e)); co
 
 log('Sistema', `PID=${process.pid} Logs=${LOG_MAX} Limpeza=${LOG_CLEAR_H}h Motor=Baileys`);
 logMem(true);
-if (LOG_CLEAR_H > 0) setInterval(() => { logs = []; logMem(true); }, LOG_CLEAR_H * 3600000).unref();
+if (LOG_CLEAR_H > 0) setInterval(() => {
+    const removed = logs.length;
+    logs = [];
+    log('Logs', `Limpeza automática executada — removidos ${removed} registros — intervalo=${LOG_CLEAR_H}h`);
+    logMem(true);
+}, LOG_CLEAR_H * 3600000).unref();
 setInterval(() => logMem(false), 300000).unref();
 
 const defaultConfig = () => ({ agendamentos: [] });
@@ -308,15 +313,28 @@ async function zipDir(src, out) {
         archive.finalize();
     });
 }
-const saveSessionRemote = async () => {
+const saveSessionRemote = async (opts = {}) => {
+    const { manual = false, reason = manual ? 'manual' : 'auto' } = opts || {};
     reqSup();
     if (!fs.existsSync(AUTH_DIR)) throw new Error('Sessão local não existe');
+    const files = [];
+    try {
+        for (const f of fs.readdirSync(AUTH_DIR)) {
+            const full = path.join(AUTH_DIR, f);
+            const st = fs.statSync(full);
+            if (st.isFile()) files.push({ name: f, bytes: st.size });
+        }
+    } catch {}
+    if (manual) log('Sessão', `Backup manual iniciado (${reason}) — arquivos=${files.length} conectado=${botConnected ? 'sim' : 'não'}`);
     const tmp = `/tmp/baileys_auth_${Date.now()}.zip`;
     await zipDir(AUTH_DIR, tmp);
     const buf = fs.readFileSync(tmp);
     await fs.promises.rm(tmp, { force: true });
+    if (!buf.length) throw new Error('Backup gerado vazio');
     const { error } = await supabase.storage.from(SUPABASE_BUCKET).upload(SUPABASE_SESSION_PATH, buf, { contentType: 'application/zip', upsert: true });
     if (error) throw error;
+    if (manual) log('Sessão', `Backup manual salvo no Supabase — arquivo=${SUPABASE_SESSION_PATH} tamanho=${Math.round(buf.length / 1024)}KB arquivos=${files.length}`);
+    return { path: SUPABASE_SESSION_PATH, bytes: buf.length, kb: Math.round(buf.length / 1024), files: files.length, connected: botConnected };
 };
 const delSessionRemote = async () => {
     reqSup();
@@ -361,7 +379,7 @@ const scheduleSessionAutosave = () => {
     if (authSaveTimer) return;
     authSaveTimer = setTimeout(async () => {
         authSaveTimer = null;
-        try { if (sessionUnhealthy) { log('Aviso', 'Backup automático ignorado: sessão inválida.'); return; } await saveSessionRemote(); log('Sessão', 'Backup automático salvo.'); }
+        try { if (sessionUnhealthy) { log('Aviso', 'Backup automático ignorado: sessão inválida.'); return; } const r = await saveSessionRemote({ reason: 'auto' }); log('Sessão', `Backup automático salvo — ${r.kb}KB ${r.files} arquivos`); }
         catch (e) { log('Aviso', 'Backup automático falhou', errMsg(e)); }
     }, SESSION_AUTOSAVE_MS);
     authSaveTimer.unref?.();
@@ -815,7 +833,7 @@ async function callMcp(name, args = {}) {
         }
         case 'enviar_mensagem_teste': return await enviarMsg(String(a.grupo || a.grupoId || '').trim(), String(a.mensagem || ''), { origem: 'mcp', grupoId: String(a.grupoId || '').trim() });
         case 'listar_logs': return logs.slice(0, Math.min(Math.max(Number(a.limite || 50), 1), 300));
-        case 'salvar_sessao': await saveSessionRemote(); return { ok: true };
+        case 'salvar_sessao': { const r = await saveSessionRemote({ manual: true, reason: 'mcp' }); return { ok: true, ...r }; }
         case 'restaurar_sessao': setTimeout(() => restoreSessionRemote().catch(e => log('Erro', 'Restore', errMsg(e))), 300); return { ok: true, msg: 'Restauração iniciada' };
         case 'excluir_sessao': await delSessionRemote(); await rmrf(AUTH_DIR); setTimeout(() => reiniciarBot(true).catch(e => log('Erro', 'Reinício', errMsg(e))), 300); return { ok: true, msg: 'Sessão limpa' };
         default: throw new Error(`Ferramenta desconhecida: ${name}`);
@@ -922,8 +940,22 @@ app.delete('/api/predefinidas/:id', async (req, res) => {
     try { const cur = await loadPredefRemote(); await savePredefRemote(cur.filter(x => String(x.id) !== String(req.params.id))); res.json({ ok: true }); }
     catch (e) { res.status(500).json({ ok: false, msg: errMsg(e) }); }
 });
-app.get('/api/logs', (req, res) => res.json(logs));
-app.post('/api/logs/clear', (req, res) => { logs = []; res.json({ ok: true }); });
+app.get('/api/logs', (req, res) => {
+    const limitRaw = Number(req.query.limit || LOG_MAX);
+    const limit = Math.min(Math.max(Number.isFinite(limitRaw) ? limitRaw : LOG_MAX, 1), 500);
+    const type = String(req.query.type || '').trim().toLowerCase();
+    const q = String(req.query.q || '').trim().toLowerCase();
+    let out = logs;
+    if (type) out = out.filter(l => String(l.type || '').toLowerCase() === type);
+    if (q) out = out.filter(l => `${l.type || ''} ${l.msg || ''} ${l.time || ''}`.toLowerCase().includes(q));
+    res.json(out.slice(0, limit));
+});
+app.post('/api/logs/clear', (req, res) => {
+    const removed = logs.length;
+    logs = [];
+    log('Logs', `Logs limpos manualmente pelo painel — removidos ${removed} registros`);
+    res.json({ ok: true, removed });
+});
 app.get('/api/memory', (req, res) => { const m = process.memoryUsage(); res.json({ rssMb: Math.round(m.rss / 1024 / 1024), heapUsedMb: Math.round(m.heapUsed / 1024 / 1024), limitHintMb: 512, engine: 'baileys' }); });
 app.post('/api/enviar', async (req, res) => {
     const { grupo, grupoId, mensagem } = req.body || {};
@@ -935,7 +967,20 @@ app.get('/api/grupos', async (req, res) => {
     if (!client || !botConnected) return res.json([]);
     try { res.json(await listGroups()); } catch (e) { log('Erro', 'Listar grupos', errMsg(e)); res.json([]); }
 });
-app.post('/api/session/save', async (req, res) => { try { if (sessionUnhealthy) return res.status(409).json({ ok: false, msg: 'Sessão marcada como inválida. Reconecte antes de salvar.' }); await saveSessionRemote(); res.json({ ok: true }); } catch (e) { res.status(500).json({ ok: false, msg: errMsg(e) }); } });
+app.post('/api/session/save', async (req, res) => {
+    try {
+        if (sessionUnhealthy) {
+            log('Aviso', 'Backup manual bloqueado: sessão marcada como inválida.');
+            return res.status(409).json({ ok: false, msg: 'Sessão marcada como inválida. Reconecte antes de salvar.' });
+        }
+        if (!botConnected) log('Aviso', 'Backup manual solicitado sem status conectado; vou salvar mesmo assim, mas confirme se a sessão está boa.');
+        const r = await saveSessionRemote({ manual: true, reason: 'botão painel' });
+        res.json({ ok: true, msg: `Sessão salva no Supabase (${r.kb}KB, ${r.files} arquivos).` });
+    } catch (e) {
+        log('Erro', 'Backup manual falhou', errMsg(e));
+        res.status(500).json({ ok: false, msg: errMsg(e) });
+    }
+});
 app.post('/api/session/delete', async (req, res) => {
     try { if (supabase) await delSessionRemote().catch(() => {}); await rmrf(AUTH_DIR); res.json({ ok: true, msg: 'Sessão limpa' }); setTimeout(() => reiniciarBot(true).catch(() => {}), 300); }
     catch (e) { res.status(500).json({ ok: false, msg: errMsg(e) }); }
