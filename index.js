@@ -1121,6 +1121,7 @@ async function iniciarBot() {
             } else {
                 addLog('Bot', `Desconectado (code=${statusCode}). Reconectando em 5s...`);
                 setBotState('connecting', 'Reconectando...');
+                clientInstance = null;
                 invalidateGruposCache();
                 if (!restarting) {
                     setTimeout(() => {
