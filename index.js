@@ -1,4 +1,4 @@
-const { makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion } = require('@whiskeysockets/baileys');
+const wppconnect = require('@wppconnect-team/wppconnect');
 const cron = require('node-cron');
 const qrcode = require('qrcode');
 const express = require('express');
@@ -10,7 +10,7 @@ const { createClient } = require('@supabase/supabase-js');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
-const AUTH_DIR = process.env.WWEBJS_AUTH_DIR || '/tmp/.wwebjs_auth';
+const TOKEN_DIR = process.env.WPP_TOKEN_DIR || '/tmp/wppconnect-tokens';
 const CONFIG_FILE = process.env.BOT_CONFIG_FILE || path.join('/tmp', 'bot_config.json');
 const BRASILIA_TZ = 'America/Sao_Paulo';
 const STARTED_AT = new Date();
@@ -18,14 +18,14 @@ const MCP_AUTH_TOKEN = process.env.MCP_AUTH_TOKEN || '';
 const MCP_ENDPOINT = process.env.MCP_ENDPOINT || '/mcp';
 const LOG_MAX = Number(process.env.LOG_MAX_ENTRIES || 180);
 const LOG_CLEAR_H = Number(process.env.LOG_AUTO_CLEAR_HOURS || 12);
-const MEM_WARN_MB = Number(process.env.MEMORY_WARN_MB || 450);
+const MEM_WARN_MB = Number(process.env.MEMORY_WARN_MB || 420);
 
 const SUPABASE_URL = process.env.SUPABASE_URL || '';
 const SUPABASE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY || '';
 const supabase = SUPABASE_URL && SUPABASE_KEY ? createClient(SUPABASE_URL, SUPABASE_KEY) : null;
 
 const SUPABASE_BUCKET = process.env.SUPABASE_BUCKET || 'whatsapp-sessions';
-const SUPABASE_SESSION_PATH = process.env.SUPABASE_SESSION_PATH || 'wwebjs_auth.zip';
+const SUPABASE_SESSION_PATH = process.env.SUPABASE_SESSION_PATH || 'wppconnect-tokens.zip';
 const SUPABASE_CONFIG_PATH = process.env.SUPABASE_CONFIG_PATH || 'bot_config.json';
 const SUPABASE_PREDEF_PATH = process.env.SUPABASE_PREDEFINIDAS_PATH || 'predefinidas.json';
 const PREDEF_FILE = process.env.BOT_PREDEFINIDAS_FILE || path.join('/tmp', 'predefinidas.json');
@@ -33,8 +33,10 @@ const PREDEF_FILE = process.env.BOT_PREDEFINIDAS_FILE || path.join('/tmp', 'pred
 app.use(express.json({ limit: '10mb' }));
 app.use(express.static('public'));
 
+// ─── UTILS ─────────────────────────────────────────────────────────────────
+
 const mkdir = p => { if (!fs.existsSync(p)) fs.mkdirSync(p, { recursive: true }); };
-const rmrf = async p => { if (fs.existsSync(p)) await fs.promises.rm(p, { recursive: true, force: true }); await fs.promises.mkdir(p, { recursive: true }); };
+const rmrf = async p => { if (fs.existsSync(p)) await fs.promises.rm(p, { recursive: true, force: true }); mkdir(p); };
 const wait = ms => new Promise(r => setTimeout(r, ms));
 const errMsg = e => e ? [e.message, e.status, e.code, e.name].filter(Boolean).join(' | ') || String(e) : 'desconhecido';
 const sanitize = t => String(t || '').replace(/\r\n/g, '\n').replace(/\r/g, '\n').replace(/[\u200B-\u200D\uFEFF]/g, '').replace(/[^\S\n\t]+$/gm, '').trim();
@@ -45,7 +47,7 @@ const brasil = () => {
     return { data: `${p.day}/${p.month}/${p.year}`, hora: `${p.hour}:${p.minute}`, diaSemana: p.weekday || '', saudacao: Number(p.hour) < 12 ? 'Bom dia' : Number(p.hour) < 18 ? 'Boa tarde' : 'Boa noite' };
 };
 
-// ─── STATE ─────────────────────────────────────
+// ─── STATE ─────────────────────────────────────────────────────────────────
 
 let config = { agendamentos: [] };
 let qrDataURL = null;
@@ -58,7 +60,6 @@ let logs = [];
 let restarting = false;
 let memWarn = false;
 let initialSyncDone = false;
-let authDone = false;
 let pendingAcks = {};
 
 let gruposCache = { list: null, at: 0, building: false };
@@ -92,7 +93,7 @@ logMem(true);
 if (LOG_CLEAR_H > 0) setInterval(() => { logs = []; logMem(true); }, LOG_CLEAR_H * 3600000);
 setInterval(() => logMem(false), 300000);
 
-// ─── HELPERS ───────────────────────────────────
+// ─── CONFIG ────────────────────────────────────────────────────────────────
 
 const defaultConfig = () => ({ agendamentos: [{ id: 1, grupo: '', grupoId: '', mensagem: '', horario: '12:00', diasSemana: [1, 2, 3], cron: '0 12 * * 1,2,3', ativo: false }] });
 
@@ -114,14 +115,6 @@ const buildCron = (horario, dias) => {
     return `${m} ${h} * * ${ds}`;
 };
 
-const parseCron = expr => {
-    const f = { horario: '12:00', diasSemana: [1, 2, 3] };
-    if (!expr || typeof expr !== 'string') return f;
-    const p = expr.trim().split(/\s+/);
-    if (p.length < 5) return f;
-    return { horario: `${String(Number.isFinite(Number(p[1])) ? Number(p[1]) : 12).padStart(2, '0')}:${String(Number.isFinite(Number(p[0])) ? Number(p[0]) : 0).padStart(2, '0')}`, diasSemana: parseDays(p[4]) };
-};
-
 const normAg = ag => {
     const d = ag.diasSemana, h = ag.horario || '12:00';
     const dias = Array.isArray(d) ? d.map(Number).filter(x => x >= 0 && x <= 6).sort() : parseDays('');
@@ -134,7 +127,7 @@ const normCfg = cfg => {
 };
 
 const loadCfg = () => {
-    try { if (fs.existsSync(CONFIG_FILE)) return normCfg(JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8'))); } catch (e) { log('Config', `Erro carregar: ${e.message}`); }
+    try { if (fs.existsSync(CONFIG_FILE)) return normCfg(JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8'))); } catch (e) { log('Config', `Erro: ${e.message}`); }
     return defaultConfig();
 };
 
@@ -146,7 +139,7 @@ const applyVars = (msg, grupo = '') => {
     return String(msg || '').replace(/{{\s*([\w.-]+)\s*}}/g, (_, k) => Object.prototype.hasOwnProperty.call(v, k) ? String(v[k]) : `{{${k}}}`);
 };
 
-// ─── SUPABASE ──────────────────────────────────
+// ─── SUPABASE ──────────────────────────────────────────────────────────────
 
 const reqSup = () => { if (!supabase) throw new Error('Supabase não configurado'); };
 
@@ -169,7 +162,7 @@ const loadCfgRemote = async () => {
         config = r;
         log('Config', `Restaurados: ${r.agendamentos.length} agendamentos`);
         return true;
-    } catch (e) { log('Erro', 'Falha restaurar config', errMsg(e)); return false; }
+    } catch (e) { log('Erro', 'Falha config', errMsg(e)); return false; }
 };
 
 const normPredef = data => {
@@ -216,10 +209,11 @@ const zipDir = async (src, out) => {
 
 const saveSessionRemote = async () => {
     reqSup();
-    mkdir(AUTH_DIR);
-    if (!fs.existsSync(AUTH_DIR)) throw new Error(`Sessão não encontrada: ${AUTH_DIR}`);
+    mkdir(TOKEN_DIR);
+    const sessionPath = path.join(TOKEN_DIR, 'whatsapp-bot');
+    if (!fs.existsSync(sessionPath)) throw new Error(`Sessão não encontrada: ${sessionPath}`);
     const tmp = `/tmp/sess_${Date.now()}.zip`;
-    const bytes = await zipDir(AUTH_DIR, tmp);
+    const bytes = await zipDir(sessionPath, tmp);
     log('Sessão', `ZIP: ${(bytes / 1024 / 1024).toFixed(2)} MB`);
     const { error } = await supabase.storage.from(SUPABASE_BUCKET).upload(SUPABASE_SESSION_PATH, fs.createReadStream(tmp), { contentType: 'application/zip', upsert: true });
     await fs.promises.rm(tmp, { force: true });
@@ -243,15 +237,17 @@ const restoreSessionRemote = async () => {
     if (error) throw error;
     await fs.promises.writeFile(tmp, Buffer.from(await data.arrayBuffer()));
     await stopBot(true);
-    await rmrf(AUTH_DIR);
-    await new Promise((res, rej) => { fs.createReadStream(tmp).pipe(unzipper.Extract({ path: AUTH_DIR })).on('close', res).on('error', rej); });
+    await rmrf(TOKEN_DIR);
+    const sessionPath = path.join(TOKEN_DIR, 'whatsapp-bot');
+    mkdir(sessionPath);
+    await new Promise((res, rej) => { fs.createReadStream(tmp).pipe(unzipper.Extract({ path: sessionPath })).on('close', res).on('error', rej); });
     await fs.promises.rm(tmp, { force: true });
     await loadCfgRemote();
     config = loadCfg();
     await iniciarBot();
 };
 
-// ─── STOP / RESTART ────────────────────────────
+// ─── STOP / RESTART ────────────────────────────────────────────────────────
 
 async function stopBot(keep = false) {
     restarting = true;
@@ -264,11 +260,16 @@ async function stopBot(keep = false) {
     client = null;
     botConnected = false;
     qrDataURL = null;
-    if (old) { try { old.end(undefined); await wait(5000); } catch (e) { log('Aviso', 'Erro stop', errMsg(e)); } }
+    if (old) {
+        try {
+            if (typeof old.close === 'function') await old.close();
+            else if (typeof old.end === 'function') await old.end();
+        } catch (e) { log('Aviso', 'Erro stop', errMsg(e)); }
+    }
     if (!keep) restarting = false;
 }
 
-// ─── CRON ──────────────────────────────────────
+// ─── CRON ──────────────────────────────────────────────────────────────────
 
 function scheduleAll() {
     Object.values(scheduledJobs).forEach(j => j.stop());
@@ -289,7 +290,7 @@ function scheduleAll() {
     });
 }
 
-// ─── WHATSAPP LIST GROUPS ──────────────────────
+// ─── WHATSAPP LIST GROUPS ──────────────────────────────────────────────────
 
 async function listGroups() {
     const c = getClient();
@@ -299,20 +300,22 @@ async function listGroups() {
     gruposCache.building = true;
     try {
         if (!getClient()) { gruposCache.building = false; return []; }
-        const map = await client.groupFetchAllParticipating();
-        const num = client.authState?.creds?.me?.id?.split(':')[0]?.split('@')[0] || '';
-        const gs = Object.entries(map).filter(([jid, m]) => !num || m.participants?.some(p => (p.id?.split(':')[0]?.split('@')[0] || '') === num)).map(([jid, m]) => ({ nome: m.subject || 'Sem nome', id: jid })).sort((a, b) => a.nome.localeCompare(b.nome));
-        if (initialSyncDone || gs.length > 0) gruposCache = { list: gs, at: Date.now(), building: false };
-        else { gruposCache = { list: null, at: 0, building: false }; log('Aviso', 'groupFetchAllParticipating() vazio — sync pendente.'); }
+        const groups = await client.getAllGroups();
+        const gs = (groups || []).map(g => {
+            const id = g.id?._serialized || g.id || g._serialized || '';
+            const name = g.name || g.subject || g.formattedTitle || 'Sem nome';
+            return { nome: name, id };
+        }).filter(g => g.id).sort((a, b) => a.nome.localeCompare(b.nome));
+        if (gs.length > 0) gruposCache = { list: gs, at: Date.now(), building: false };
+        else { gruposCache = { list: null, at: 0, building: false }; log('Aviso', 'Nenhum grupo encontrado.'); }
         return gs;
     } catch (e) { gruposCache.building = false; throw e; }
 }
 
-// ─── WHATSAPP SEND MESSAGE ─────────────────────
+// ─── WHATSAPP SEND MESSAGE ─────────────────────────────────────────────────
 
 async function enviarMsg(grupo, mensagem, meta = {}) {
     const grupoId = meta.grupoId || '';
-    const origem = meta.origem || 'manual';
     if (!client || !botConnected) {
         log('Erro', `Bot não conectado (${botStatus})`);
         return { ok: false, msg: `Bot não conectado. Estado: ${botStatus}` };
@@ -320,137 +323,123 @@ async function enviarMsg(grupo, mensagem, meta = {}) {
     try {
         const msg = sanitize(applyVars(mensagem, grupo));
         if (!msg) return { ok: false, msg: 'Mensagem vazia' };
-        let destId = grupoId, destNome = grupo;
-        if (!destId) {
-            const map = await client.groupFetchAllParticipating();
-            const match = Object.entries(map).filter(([j, m]) => m.subject === grupo);
-            if (!match[0]) return { ok: false, msg: `Grupo "${grupo}" não encontrado` };
-            destId = match[0][0];
-            destNome = match[0][1].subject;
-        }
-        try {
-            const meta = await client.groupMetadata(destId);
-            const num = client.authState?.creds?.me?.id?.split(':')[0]?.split('@')[0] || '';
-            if (num && meta.participants?.length) {
-                const inGroup = meta.participants.some(p => (p.id?.split(':')[0]?.split('@')[0] || '') === num);
-                if (!inGroup) return { ok: false, msg: `Bot removido do grupo "${meta.subject || destNome}"` };
-            }
-            destNome = meta.subject || destNome;
-            log('WhatsApp', `Enviando para "${destNome}" (${destId})`);
-            const sent = await client.sendMessage(destId, { text: msg });
-            const id = sent?.key?.id;
-            if (!id) { log('Sucesso', `Enviado "${destNome}" sem ID`); return { ok: true, grupo: destNome, grupoId: destId }; }
-            return await new Promise(res => {
-                let done = false;
-                const to = setTimeout(() => { if (done) return; done = true; delete pendingAcks[id]; res({ ok: true, grupo: destNome, grupoId: destId }); }, 15000);
-                pendingAcks[id] = status => {
-                    if (done) return; done = true; clearTimeout(to); delete pendingAcks[id];
-                    const lbl = { 0: 'ERRO', 1: 'enviado', 2: 'entregue', 3: 'lida', 4: 'reproduzida' };
-                    log('ACK', `${id}: ${lbl[String(status)] || status}`);
-                    if (status === 0) res({ ok: false, msg: `ACK negativo: rejeitada para "${destNome}"` });
-                    else res({ ok: true, id, grupo: destNome, grupoId: destId });
-                };
+        let destId = grupoId || grupo;
+        let destNome = grupo;
+        if (!grupoId) {
+            const groups = await client.getAllGroups();
+            const match = (groups || []).find(g => {
+                const name = g.name || g.subject || g.formattedTitle || '';
+                return name === grupo;
             });
-        } catch (e) { return { ok: false, msg: `Grupo "${destNome}" inválido: ${errMsg(e)}` }; }
+            if (!match) return { ok: false, msg: `Grupo "${grupo}" não encontrado` };
+            destId = match.id?._serialized || match.id || '';
+            destNome = match.name || match.subject || grupo;
+        }
+        log('WhatsApp', `Enviando para "${destNome}" (${destId})`);
+        const sent = await client.sendText(destId, msg);
+        const id = sent?.id || sent?._serialized || '';
+        if (!id) { log('Sucesso', `Enviado "${destNome}"`); return { ok: true, grupo: destNome, grupoId: destId }; }
+        return await new Promise(res => {
+            let done = false;
+            const to = setTimeout(() => { if (done) return; done = true; delete pendingAcks[id]; res({ ok: true, grupo: destNome, grupoId: destId }); }, 15000);
+            pendingAcks[id] = status => {
+                if (done) return; done = true; clearTimeout(to); delete pendingAcks[id];
+                const lbl = { 0: 'ERRO', 1: 'enviado', 2: 'entregue', 3: 'lida', 4: 'reproduzida' };
+                log('ACK', `${id}: ${lbl[String(status)] || status}`);
+                if (status === 0) res({ ok: false, msg: `ACK negativo: rejeitada para "${destNome}"` });
+                else res({ ok: true, id, grupo: destNome, grupoId: destId });
+            };
+        });
     } catch (e) { return { ok: false, msg: errMsg(e) }; }
 }
 
-// ─── WHATSAPP CLIENT ───────────────────────────
+// ─── WHATSAPP CLIENT (wppconnect) ─────────────────────────────────────────
 
 async function iniciarBot() {
     if (client) return;
-    authDone = false;
     initialSyncDone = false;
     setState('connecting', 'Iniciando WhatsApp...');
-    mkdir(AUTH_DIR);
-    log('Info', `Sessão: ${AUTH_DIR}`);
+    mkdir(TOKEN_DIR);
+    log('Info', `Tokens: ${TOKEN_DIR}`);
     try {
-        const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
-        const { version } = await fetchLatestBaileysVersion();
-        log('Info', `Baileys v${version.join('.')}`);
-        const sock = makeWASocket({ version, auth: state, browser: ['Chrome (Linux)', '', ''], syncFullHistory: false, markOnlineOnConnect: false });
-        client = sock;
+        const wpp = await wppconnect.create({
+            session: 'whatsapp-bot',
+            headless: true,
+            useChrome: false,
+            disableWelcome: true,
+            logQR: false,
+            autoClose: 0,
+            deviceName: 'WA Bot',
+            folderNameToken: TOKEN_DIR,
+            browserArgs: [
+                '--no-sandbox',
+                '--disable-setuid-sandbox',
+                '--disable-gpu',
+                '--disable-dev-shm-usage',
+                '--disable-software-rasterizer',
+                '--no-first-run',
+                '--no-zygote',
+            ],
+        });
 
-        sock.ev.on('connection.update', async up => {
-            const { connection, lastDisconnect, qr, isNewLogin } = up;
+        client = wpp;
 
-            if (isNewLogin) { authDone = true; log('Bot', 'Novo login detectado.'); }
+        wpp.onStateChange(async (state) => {
+            log('Estado', `WhatsApp: ${state}`);
 
-            if (qr) {
-                log('QR', 'Novo QR Code — escaneie no painel.');
-                qrDataURL = await qrcode.toDataURL(qr);
+            if (state === 'QRCode') {
+                try {
+                    const qr = await wpp.getQrCode();
+                    if (qr && qr.base64) {
+                        qrDataURL = 'data:image/png;base64,' + qr.base64;
+                        log('QR', 'Novo QR Code — escaneie no painel.');
+                    }
+                } catch (e) { log('Erro', 'Falha ao gerar QR', errMsg(e)); }
                 setState('qr', 'Aguardando escaneamento...');
                 botConnected = false;
                 restarting = false;
             }
 
-            if (connection === 'open') {
-                const hasAuth = sock.authState?.creds?.me?.id;
-                if (hasAuth) {
-                    log('Bot', 'Conectado com sucesso!');
-                    qrDataURL = null;
-                    setState('ready', 'Conectado');
-                    botConnected = true;
-                    restarting = false;
-                    initialSyncDone = true;
-                    invalCache();
-                    scheduleAll();
-                    listGroups().catch(() => {});
-                } else {
-                    log('Aviso', 'Conexão aberta sem auth (me.id ausente). Limpando...');
-                    qrDataURL = null;
-                    botConnected = false;
-                    client = null;
-                    await rmrf(AUTH_DIR);
-                    iniciarBot();
-                }
+            if (state === 'CONNECTED' || state === 'isLogged') {
+                try {
+                    const me = await wpp.getHostDevice();
+                    log('Bot', `Conectado! ${me?.pushname || ''} (${me?.wid?._serialized || me?.wid || ''})`);
+                } catch (e) { log('Bot', 'Conectado com sucesso!'); }
+                qrDataURL = null;
+                setState('ready', 'Conectado');
+                botConnected = true;
+                restarting = false;
+                initialSyncDone = true;
+                invalCache();
+                scheduleAll();
+                listGroups().catch(() => {});
             }
 
-            if (connection === 'close') {
-                const code = lastDisconnect?.error?.output?.statusCode;
-                const logout = code === DisconnectReason.loggedOut;
-                const restartReq = code === DisconnectReason.restartRequired;
-                const inQr = botState === 'qr' || qrDataURL !== null;
-                const paired = authDone || sock.authState?.creds?.me?.id;
+            if (state === 'DISCONNECTED' || state === 'CONFLICT' || state === 'UNPAIRED' || state === 'UNPAIRED_IDLE') {
+                log('Bot', `Estado: ${state}. Reconexão automática...`);
                 botConnected = false;
                 qrDataURL = null;
-
-                if (logout || (restartReq && inQr && !paired)) {
-                    log('Erro', `Sessão fechada (${logout ? 'logout' : 'QR expirado'}). Limpando...`);
-                    setState('disconnected', 'Sessão expirada');
-                    client = null;
-                    restarting = false;
-                    invalCache();
-                    await rmrf(AUTH_DIR);
-                    iniciarBot();
-                } else {
-                    log('Bot', `Desconectado (code=${code}). Reconectando...`);
-                    setState('connecting', 'Reconectando...');
-                    client = null;
-                    invalCache();
-                    if (!restarting) setTimeout(() => { if (!client && !restarting) iniciarBot(); }, 2000);
+                if (state === 'CONFLICT') {
+                    log('Erro', 'Outro dispositivo usando a conta. Aguardando...');
                 }
             }
         });
 
-        sock.ev.on('creds.update', up => {
-            saveCreds(up);
-            if (up.me?.id) authDone = true;
+        wpp.onQRCode(async (qr) => {
+            try {
+                qrDataURL = await qrcode.toDataURL(qr);
+                log('QR', 'Novo QR Code — escaneie no painel.');
+            } catch (e) { log('Erro', 'Falha QR', errMsg(e)); }
         });
 
-        sock.ev.on('messages.update', updates => {
-            for (const { key, update } of updates) {
-                if (!key.fromMe) continue;
-                const cb = pendingAcks[key.id];
-                if (cb && update.status !== undefined) cb(update.status);
-            }
+        wpp.onAck(async (ack) => {
+            const id = ack?.id || ack?._serialized || '';
+            const status = ack?.status ?? ack?.ack ?? -1;
+            const cb = pendingAcks[id];
+            if (cb) cb(status);
         });
 
-        sock.ev.on('group-participants.update', () => invalCache());
-
-        sock.ev.on('messaging-history.set', () => {
-            if (!initialSyncDone) { initialSyncDone = true; log('Bot', 'Sync concluído.'); invalCache(); listGroups().catch(() => {}); }
-        });
+        wpp.onParticipantsChanged(async () => { invalCache(); });
 
         log('Bot', 'Aguardando conexão...');
     } catch (e) {
@@ -460,7 +449,7 @@ async function iniciarBot() {
     }
 }
 
-// ─── MCP ───────────────────────────────────────
+// ─── MCP ───────────────────────────────────────────────────────────────────
 
 const mcpAuth = (req, res, next) => {
     if (!MCP_AUTH_TOKEN) return res.status(503).json({ ok: false, error: 'MCP_AUTH_TOKEN não configurado.' });
@@ -491,7 +480,6 @@ const mcpTools = () => [
     mcpTool('restaurar_sessao', 'Restaura sessão do Supabase', { type: 'object', properties: {}, additionalProperties: false }),
     mcpTool('excluir_sessao', 'Exclui sessão do Supabase', { type: 'object', properties: {}, additionalProperties: false }),
     mcpTool('atualizar_sessao_e_grupos', 'Reinicia client WhatsApp', { type: 'object', properties: {}, additionalProperties: false }),
-    mcpTool('gerar_codigo_emparelhamento', 'Gera pairing code (alternativa ao QR)', { type: 'object', properties: { telefone: { type: 'string', description: 'Ex: 5511999999999' } }, required: ['telefone'], additionalProperties: false }),
 ];
 
 const mcpStatus = () => ({
@@ -504,7 +492,7 @@ const mcpStatus = () => ({
 const persistCfg = async () => {
     config = normCfg(config);
     saveCfg(config);
-    try { await saveCfgRemote(); } catch (e) { log('Erro', 'Supabase config falhou', errMsg(e)); }
+    try { await saveCfgRemote(); } catch (e) { log('Erro', 'Supabase config', errMsg(e)); }
     if (botConnected) scheduleAll();
 };
 
@@ -560,7 +548,7 @@ async function callMcp(name, args = {}) {
             if (!item) throw new Error('Título ou mensagem obrigatórios');
             const cur = await loadPredefRemote();
             cur.unshift(item);
-            const saved = await savePredefRemote(cur);
+            await savePredefRemote(cur);
             log('MCP', `Predef criada: "${item.titulo || item.id}"`);
             return { ok: true, predefinida: item };
         }
@@ -577,7 +565,7 @@ async function callMcp(name, args = {}) {
         case 'excluir_predefinida': {
             const id = a.id; if (id === undefined || id === null || id === '') throw new Error('ID obrigatório');
             const cur = await loadPredefRemote();
-            const saved = await savePredefRemote(cur.filter(x => String(x.id) !== String(id)));
+            await savePredefRemote(cur.filter(x => String(x.id) !== String(id)));
             log('MCP', `Predef excluída: ${id}`);
             return { ok: true };
         }
@@ -590,18 +578,8 @@ async function callMcp(name, args = {}) {
         case 'listar_logs': return logs.slice(0, Math.min(Math.max(Number(a.limite || 50), 1), 300));
         case 'salvar_sessao': await saveSessionRemote(); log('MCP', 'Sessão salva.'); return { ok: true };
         case 'restaurar_sessao': setTimeout(async () => { try { await restoreSessionRemote(); } catch (e) { log('Erro', 'Restore', errMsg(e)); setState('error', 'Erro restore'); restarting = false; } }, 300); return { ok: true, msg: 'Restauração iniciada' };
-        case 'excluir_sessao': await delSessionRemote(); await rmrf(AUTH_DIR); setTimeout(async () => { try { await stopBot(true); await wait(1500); await iniciarBot(); } catch (e) { log('Erro', 'Reinício', errMsg(e)); setState('error', 'Erro reinício'); restarting = false; } }, 300); return { ok: true, msg: 'Sessão limpa' };
+        case 'excluir_sessao': await delSessionRemote(); await rmrf(TOKEN_DIR); setTimeout(async () => { try { await stopBot(true); await wait(1500); await iniciarBot(); } catch (e) { log('Erro', 'Reinício', errMsg(e)); setState('error', 'Erro reinício'); restarting = false; } }, 300); return { ok: true, msg: 'Sessão limpa' };
         case 'atualizar_sessao_e_grupos': setTimeout(async () => { try { await stopBot(true); await wait(1500); await iniciarBot(); } catch (e) { log('Erro', 'Reinício', errMsg(e)); setState('error', 'Erro reinício'); restarting = false; } }, 300); return { ok: true, msg: 'Reinício iniciado' };
-        case 'gerar_codigo_emparelhamento': {
-            const phone = String(a.telefone || '').replace(/\D/g, '');
-            if (!phone || phone.length < 10 || phone.length > 15) throw new Error('Número inválido. Use: 5511999999999');
-            if (!client || typeof client.requestPairingCode !== 'function') throw new Error('Bot não está pronto para emparelhamento');
-            log('Pairing', `Solicitando código para ${phone}...`);
-            const code = await client.requestPairingCode(phone);
-            const fmt = String(code).match(/.{1,4}/g)?.join('-') || String(code);
-            log('Pairing', `Código: ${fmt}`);
-            return { ok: true, code: fmt, rawCode: String(code), phone };
-        }
         default: throw new Error(`Ferramenta desconhecida: ${name}`);
     }
 }
@@ -610,7 +588,7 @@ const handleMcp = async payload => {
     if (!payload || typeof payload !== 'object') return { jsonrpc: '2.0', id: null, error: { code: -32600, message: 'Inválido' } };
     const id = payload.id ?? null;
     try {
-        if (payload.method === 'initialize') return { jsonrpc: '2.0', id, result: { protocolVersion: payload.params?.protocolVersion || '2024-11-05', capabilities: { tools: {} }, serverInfo: { name: 'bot-whatsapp-mcp', version: '2.0' } } };
+        if (payload.method === 'initialize') return { jsonrpc: '2.0', id, result: { protocolVersion: payload.params?.protocolVersion || '2024-11-05', capabilities: { tools: {} }, serverInfo: { name: 'bot-whatsapp-mcp', version: '3.0' } } };
         if (payload.method === 'notifications/initialized') return null;
         if (payload.method === 'tools/list') return { jsonrpc: '2.0', id, result: { tools: mcpTools() } };
         if (payload.method === 'tools/call') { const r = await callMcp(payload.params.name, payload.params.arguments); return { jsonrpc: '2.0', id, result: mcpR(r) }; }
@@ -618,7 +596,7 @@ const handleMcp = async payload => {
     } catch (e) { return { jsonrpc: '2.0', id, result: mcpR({ ok: false, error: errMsg(e) }, true) }; }
 };
 
-// ─── API ROUTES ────────────────────────────────
+// ─── API ROUTES ────────────────────────────────────────────────────────────
 
 app.get('/api/health', (req, res) => res.json({ ok: true, service: 'wa-bot', uptime: Math.floor(process.uptime()), state: botState, connected: botConnected, mcpConfigured: Boolean(MCP_AUTH_TOKEN) }));
 app.get('/health', (req, res) => res.redirect('/api/health'));
@@ -663,12 +641,12 @@ app.post('/api/predefinidas', async (req, res) => {
         const cur = await loadPredefRemote();
         const idx = cur.findIndex(x => String(x.id) === String(item.id));
         if (idx >= 0) cur[idx] = item; else cur.unshift(item);
-        const saved = await savePredefRemote(cur);
+        await savePredefRemote(cur);
         res.json({ ok: true, predefinida: item });
     } catch (e) { res.status(500).json({ ok: false, msg: errMsg(e) }); }
 });
 app.delete('/api/predefinidas/:id', async (req, res) => {
-    try { const cur = await loadPredefRemote(); const saved = await savePredefRemote(cur.filter(x => String(x.id) !== String(req.params.id))); res.json({ ok: true }); }
+    try { const cur = await loadPredefRemote(); await savePredefRemote(cur.filter(x => String(x.id) !== String(req.params.id))); res.json({ ok: true }); }
     catch (e) { res.status(500).json({ ok: false, msg: errMsg(e) }); }
 });
 
@@ -692,7 +670,7 @@ app.post('/api/session/save', async (req, res) => {
     try { await saveSessionRemote(); res.json({ ok: true }); } catch (e) { res.status(500).json({ ok: false, msg: errMsg(e) }); }
 });
 app.post('/api/session/delete', async (req, res) => {
-    try { await delSessionRemote(); await rmrf(AUTH_DIR); res.json({ ok: true, msg: 'Sessão limpa' }); setTimeout(async () => { try { await stopBot(true); await wait(1500); await iniciarBot(); } catch (e) {} }, 300); }
+    try { await delSessionRemote(); await rmrf(TOKEN_DIR); res.json({ ok: true, msg: 'Sessão limpa' }); setTimeout(async () => { try { await stopBot(true); await wait(1500); await iniciarBot(); } catch (e) {} }, 300); }
     catch (e) { res.status(500).json({ ok: false, msg: errMsg(e) }); }
 });
 app.post('/api/session/restart', async (req, res) => {
@@ -704,19 +682,6 @@ app.post('/api/session/restore', async (req, res) => {
     catch (e) { res.status(500).json({ ok: false, msg: errMsg(e) }); }
 });
 
-app.post('/api/pairing-code', async (req, res) => {
-    try {
-        const phone = String(req.body?.phone || '').replace(/\D/g, '');
-        if (!phone || phone.length < 10 || phone.length > 15) return res.status(400).json({ ok: false, msg: 'Número inválido. Formato: 5511999999999' });
-        if (!client || typeof client.requestPairingCode !== 'function') return res.status(503).json({ ok: false, msg: 'Bot não pronto para emparelhamento' });
-        log('Pairing', `Solicitando código para ${phone}...`);
-        const code = await client.requestPairingCode(phone);
-        const fmt = String(code).match(/.{1,4}/g)?.join('-') || String(code);
-        log('Pairing', `Código: ${fmt}`);
-        res.json({ ok: true, code: fmt, rawCode: String(code), phone });
-    } catch (e) { log('Erro', 'Pairing', errMsg(e)); res.status(500).json({ ok: false, msg: errMsg(e) }); }
-});
-
 app.get('/', (req, res) => res.sendFile(path.join(__dirname, 'public', 'index.html')));
 
 app.listen(PORT, () => {
@@ -724,7 +689,7 @@ app.listen(PORT, () => {
     log('Servidor', `MCP: ${MCP_ENDPOINT} ${MCP_AUTH_TOKEN ? '(token)' : '(desativado)'}`);
 });
 
-// ─── BOOT ──────────────────────────────────────
+// ─── BOOT ──────────────────────────────────────────────────────────────────
 
 async function bootstrap() {
     await loadCfgRemote();
