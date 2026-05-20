@@ -839,8 +839,13 @@ async function callMcpTool(name, args = {}) {
 
         case 'excluir_sessao':
             await deleteSessionFromSupabase();
-            addLog('MCP', 'Sessão excluída via MCP.');
-            return { ok: true, msg: 'Sessão excluída do Supabase.' };
+            await clearDirectory(AUTH_DIR);
+            addLog('MCP', 'Sessão excluída do Supabase e sessão local limpa.');
+            setTimeout(async () => {
+                try { await stopBot(true); await wait(1500); await iniciarBot(); addLog('MCP', 'Bot reiniciado para gerar novo QR.'); }
+                catch (e) { addLog('Erro', 'Erro ao reiniciar após excluir sessão', getErrorDetails(e)); setBotState('error', 'Erro ao reiniciar'); restarting = false; }
+            }, 300);
+            return { ok: true, msg: 'Sessão excluída do Supabase e sessão local limpa. Bot reiniciando para gerar QR.' };
 
         case 'atualizar_sessao_e_grupos':
             addLog('MCP', 'Reinício local solicitado via MCP.');
@@ -1024,8 +1029,13 @@ app.post('/api/session/save', async (req, res) => {
 app.post('/api/session/delete', async (req, res) => {
     try {
         await deleteSessionFromSupabase();
-        addLog('Sessão', 'Sessão excluída do Supabase.');
-        res.json({ ok: true, msg: 'Sessão excluída do Supabase.' });
+        await clearDirectory(AUTH_DIR);
+        addLog('Sessão', 'Sessão excluída do Supabase e sessão local limpa.');
+        res.json({ ok: true, msg: 'Sessão excluída do Supabase e sessão local limpa. Reiniciando bot para gerar QR...' });
+        setTimeout(async () => {
+            try { await stopBot(true); await wait(1500); await iniciarBot(); addLog('Sessão', 'Bot reiniciado após excluir sessão local.'); }
+            catch (e) { addLog('Erro', 'Erro ao reiniciar após excluir sessão', getErrorDetails(e)); setBotState('error', 'Erro ao reiniciar'); restarting = false; }
+        }, 300);
     } catch (e) { addLog('Erro', 'Erro ao excluir sessão', getErrorDetails(e)); res.status(500).json({ ok: false, msg: getErrorDetails(e) }); }
 });
 
@@ -1097,13 +1107,24 @@ async function iniciarBot() {
             }
 
             if (connection === 'open') {
-                addLog('Bot', 'Conectado com sucesso!');
-                qrCodeDataURL = null;
-                setBotState('ready', 'Conectado');
-                botConnected = true;
-                restarting = false;
-                invalidateGruposCache();
-                scheduleAll();
+                const isAuthenticated = sock.user && sock.user.id;
+                if (isAuthenticated) {
+                    addLog('Bot', 'Conectado com sucesso!');
+                    qrCodeDataURL = null;
+                    setBotState('ready', 'Conectado');
+                    botConnected = true;
+                    restarting = false;
+                    invalidateGruposCache();
+                    scheduleAll();
+                } else {
+                    addLog('Aviso', 'Conexão WebSocket aberta mas WhatsApp NÃO autenticado. Limpando sessão para gerar QR...');
+                    qrCodeDataURL = null;
+                    botConnected = false;
+                    clientInstance = null;
+                    await clearDirectory(AUTH_DIR);
+                    addLog('Bot', 'Sessão local limpa (credenciais parciais). Iniciando bot para gerar QR...');
+                    iniciarBot();
+                }
             }
 
             if (connection === 'close') {
@@ -1113,11 +1134,15 @@ async function iniciarBot() {
                 qrCodeDataURL = null;
 
                 if (loggedOut) {
-                    addLog('Erro', 'Sessão expirada/logout. Escaneie o QR novamente.');
+                    addLog('Erro', 'Sessão expirada/logout. Limpando sessão local para gerar QR...');
                     setBotState('disconnected', 'Sessão expirada');
                     clientInstance = null;
+                    qrCodeDataURL = null;
                     restarting = false;
                     invalidateGruposCache();
+                    await clearDirectory(AUTH_DIR);
+                    addLog('Bot', 'Sessão local limpa. Iniciando bot para gerar QR...');
+                    iniciarBot();
                 } else {
                     addLog('Bot', `Desconectado (code=${statusCode}). Reconectando em 5s...`);
                     setBotState('connecting', 'Reconectando...');
