@@ -304,12 +304,12 @@ async function listGroupsInternal() {
         if (!getClient()) { gruposCache.building = false; return []; }
 
         const groupsMap = await clientInstance.groupFetchAllParticipating();
-        const botJid = clientInstance.user?.id?.split(':')[0] || '';
+        const botNumber = clientInstance.user?.id?.split(':')[0]?.split('@')[0] || '';
 
         const grupos = Object.entries(groupsMap)
             .filter(([jid, meta]) => {
-                if (!botJid) return true;
-                return meta.participants?.some(p => p.id === botJid);
+                if (!botNumber) return true;
+                return meta.participants?.some(p => (p.id?.split(':')[0]?.split('@')[0] || '') === botNumber);
             })
             .map(([jid, meta]) => ({
                 nome: meta.subject || 'Sem nome',
@@ -365,9 +365,9 @@ async function enviarLembrete(grupo, mensagem, meta = {}) {
         if (!getClient()) return { ok: false, msg: 'Bot desconectou antes de validar o grupo.' };
         try {
             const meta = await clientInstance.groupMetadata(destinoId);
-            const botJid = clientInstance.user?.id?.split(':')[0] || '';
-            if (botJid && meta.participants?.length) {
-                const participa = meta.participants.some(p => p.id === botJid);
+            const botNumber = clientInstance.user?.id?.split(':')[0]?.split('@')[0] || '';
+            if (botNumber && meta.participants?.length) {
+                const participa = meta.participants.some(p => (p.id?.split(':')[0]?.split('@')[0] || '') === botNumber);
                 if (!participa) {
                     addLog('Erro', `Bot NÃO está mais no grupo "${destinoNome}" (${destinoId}). Corrija o agendamento.`);
                     return { ok: false, msg: `Bot foi removido do grupo "${destinoNome}". Corrija o agendamento.` };
