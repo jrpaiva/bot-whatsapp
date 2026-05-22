@@ -35,7 +35,15 @@ services:
       - key: PAIRING_WAIT_MS
         value: 90000
       - key: SESSION_AUTOSAVE_MS
-        value: 60000
+        value: 21600000
+      - key: SESSION_BACKUP_ONLY_ON_CHANGE
+        value: true
+      - key: DEBUG_GROUP_EVENTS
+        value: false
+      - key: GROUPS_CACHE_TTL_MS
+        value: 1800000
+      - key: GROUPS_FETCH_MIN_INTERVAL_MS
+        value: 300000
 
       - key: DEBUG_SEND
         value: true

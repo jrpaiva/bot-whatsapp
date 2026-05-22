@@ -31,7 +31,7 @@ const MEM_WARN_MB = Number(process.env.MEMORY_WARN_MB || 360);
 const MEM_RESTART_MB = Number(process.env.MEMORY_RESTART_MB || 470);
 const PAIRING_WAIT_MS = Number(process.env.PAIRING_WAIT_MS || 90000);
 const RECONNECT_DELAY_MS = Number(process.env.RECONNECT_DELAY_MS || 5000);
-const SESSION_AUTOSAVE_MS = Number(process.env.SESSION_AUTOSAVE_MS || 60000);
+const SESSION_AUTOSAVE_MS = Number(process.env.SESSION_AUTOSAVE_MS || 21600000); // 6h padrão; evita backup repetido de sessão idêntica
 const MARK_ONLINE_ON_CONNECT = String(process.env.MARK_ONLINE_ON_CONNECT || 'false').toLowerCase() === 'true';
 const SEND_TIMEOUT_MS = Number(process.env.SEND_TIMEOUT_MS || 45000);
 const DEBUG_SEND = String(process.env.DEBUG_SEND || 'true').toLowerCase() !== 'false';
@@ -39,6 +39,11 @@ const SEND_RETRY_ATTEMPTS = Number(process.env.SEND_RETRY_ATTEMPTS || 2);
 const SEND_RETRY_DELAY_MS = Number(process.env.SEND_RETRY_DELAY_MS || 2500);
 const RESET_ON_PERSISTENT_NO_SESSIONS = String(process.env.RESET_ON_PERSISTENT_NO_SESSIONS || 'true').toLowerCase() !== 'false';
 const DELETE_REMOTE_SESSION_ON_AUTH_ERROR = String(process.env.DELETE_REMOTE_SESSION_ON_AUTH_ERROR || 'true').toLowerCase() !== 'false';
+const DEBUG_GROUP_EVENTS = String(process.env.DEBUG_GROUP_EVENTS || 'false').toLowerCase() === 'true';
+const GROUPS_CACHE_TTL_MS = Number(process.env.GROUPS_CACHE_TTL_MS || 30 * 60 * 1000);
+const GROUPS_FETCH_MIN_INTERVAL_MS = Number(process.env.GROUPS_FETCH_MIN_INTERVAL_MS || 5 * 60 * 1000);
+const GROUPS_RATE_LIMIT_LOG_MS = Number(process.env.GROUPS_RATE_LIMIT_LOG_MS || 10 * 60 * 1000);
+const SESSION_BACKUP_ONLY_ON_CHANGE = String(process.env.SESSION_BACKUP_ONLY_ON_CHANGE || 'true').toLowerCase() !== 'false';
 
 const SUPABASE_URL = process.env.SUPABASE_URL || '';
 const SUPABASE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY || '';
@@ -174,7 +179,11 @@ let groupsMetadataCache = {};
 let lastCredsUpdateAt = 0;
 let sessionUnhealthy = false;
 let hardResetScheduled = false;
-const CACHE_TTL = 2 * 60 * 1000;
+let lastSessionBackupHash = '';
+let lastSessionBackupAt = 0;
+let lastGroupsFetchAt = 0;
+let lastGroupsRateLimitLogAt = 0;
+
 
 const getClient = () => (client && botConnected ? client : null);
 const invalCache = (clearMetadata = false) => { groupsCache = { list: null, at: 0, building: false }; if (clearMetadata) groupsMetadataCache = {}; };
@@ -313,6 +322,19 @@ async function zipDir(src, out) {
         archive.finalize();
     });
 }
+async function hashDirFiles(src) {
+    const h = crypto.createHash('sha256');
+    if (!fs.existsSync(src)) return '';
+    const names = fs.readdirSync(src).sort();
+    for (const name of names) {
+        const full = path.join(src, name);
+        const st = fs.statSync(full);
+        if (!st.isFile()) continue;
+        h.update(name); h.update(':'); h.update(String(st.size)); h.update(':');
+        h.update(fs.readFileSync(full)); h.update('\n');
+    }
+    return h.digest('hex');
+}
 const saveSessionRemote = async (opts = {}) => {
     const { manual = false, reason = manual ? 'manual' : 'auto' } = opts || {};
     reqSup();
@@ -325,6 +347,10 @@ const saveSessionRemote = async (opts = {}) => {
             if (st.isFile()) files.push({ name: f, bytes: st.size });
         }
     } catch {}
+    const currentHash = await hashDirFiles(AUTH_DIR);
+    if (!manual && SESSION_BACKUP_ONLY_ON_CHANGE && currentHash && currentHash === lastSessionBackupHash) {
+        return { path: SUPABASE_SESSION_PATH, bytes: 0, kb: 0, files: files.length, connected: botConnected, skipped: true, reason: 'sem alterações' };
+    }
     if (manual) log('Sessão', `Backup manual iniciado (${reason}) — arquivos=${files.length} conectado=${botConnected ? 'sim' : 'não'}`);
     const tmp = `/tmp/baileys_auth_${Date.now()}.zip`;
     await zipDir(AUTH_DIR, tmp);
@@ -333,8 +359,10 @@ const saveSessionRemote = async (opts = {}) => {
     if (!buf.length) throw new Error('Backup gerado vazio');
     const { error } = await supabase.storage.from(SUPABASE_BUCKET).upload(SUPABASE_SESSION_PATH, buf, { contentType: 'application/zip', upsert: true });
     if (error) throw error;
+    lastSessionBackupHash = currentHash;
+    lastSessionBackupAt = Date.now();
     if (manual) log('Sessão', `Backup manual salvo no Supabase — arquivo=${SUPABASE_SESSION_PATH} tamanho=${Math.round(buf.length / 1024)}KB arquivos=${files.length}`);
-    return { path: SUPABASE_SESSION_PATH, bytes: buf.length, kb: Math.round(buf.length / 1024), files: files.length, connected: botConnected };
+    return { path: SUPABASE_SESSION_PATH, bytes: buf.length, kb: Math.round(buf.length / 1024), files: files.length, connected: botConnected, skipped: false };
 };
 const delSessionRemote = async () => {
     reqSup();
@@ -377,11 +405,18 @@ const scheduleSessionAutosave = () => {
     if (!supabase || SESSION_AUTOSAVE_MS <= 0) return;
     if (sessionUnhealthy) { log('Aviso', 'Backup automático ignorado: sessão marcada como inválida.'); return; }
     if (authSaveTimer) return;
+    const elapsed = lastSessionBackupAt ? Date.now() - lastSessionBackupAt : SESSION_AUTOSAVE_MS;
+    const delay = Math.max(SESSION_AUTOSAVE_MS - elapsed, 5000);
     authSaveTimer = setTimeout(async () => {
         authSaveTimer = null;
-        try { if (sessionUnhealthy) { log('Aviso', 'Backup automático ignorado: sessão inválida.'); return; } const r = await saveSessionRemote({ reason: 'auto' }); log('Sessão', `Backup automático salvo — ${r.kb}KB ${r.files} arquivos`); }
+        try {
+            if (sessionUnhealthy) { log('Aviso', 'Backup automático ignorado: sessão inválida.'); return; }
+            const r = await saveSessionRemote({ reason: 'auto' });
+            if (r.skipped) return;
+            log('Sessão', `Backup automático salvo — ${r.kb}KB ${r.files} arquivos`);
+        }
         catch (e) { log('Aviso', 'Backup automático falhou', errMsg(e)); }
-    }, SESSION_AUTOSAVE_MS);
+    }, delay);
     authSaveTimer.unref?.();
 };
 
@@ -581,8 +616,15 @@ async function iniciarBot() {
                 for (const u of updates || []) log('Debug', `receipt.update — ${shortJson(u)}`);
             });
 
-            sock.ev.on('groups.update', updates => { invalCache(); if (DEBUG_SEND) log('Debug', `groups.update qtd=${updates?.length || 0}`); });
-            sock.ev.on('group-participants.update', ev => { invalCache(); if (DEBUG_SEND) log('Debug', `group-participants.update ${shortJson(ev)}`); });
+            sock.ev.on('groups.update', updates => {
+                for (const g of updates || []) if (g?.id) groupsMetadataCache[g.id] = { ...(groupsMetadataCache[g.id] || {}), ...g };
+                if (DEBUG_GROUP_EVENTS) log('Debug', `groups.update qtd=${updates?.length || 0}`);
+            });
+            sock.ev.on('group-participants.update', ev => {
+                if (ev?.id) delete groupsMetadataCache[ev.id];
+                groupsCache.at = 0; // lista pode ter mudado, mas não força fetch imediato
+                if (DEBUG_GROUP_EVENTS) log('Debug', `group-participants.update ${shortJson(ev)}`);
+            });
             log('Bot', 'Socket Baileys iniciado.');
         } catch (e) {
             client = null;
@@ -629,8 +671,11 @@ async function handleIncomingMessage(msg) {
     }
 }
 
-async function listGroups() {
-    if (groupsCache.list && Date.now() - groupsCache.at < CACHE_TTL) return groupsCache.list;
+async function listGroups(opts = {}) {
+    const force = opts.force === true;
+    const now = Date.now();
+    if (!force && groupsCache.list && now - groupsCache.at < GROUPS_CACHE_TTL_MS) return groupsCache.list;
+    if (!force && groupsCache.list && now - lastGroupsFetchAt < GROUPS_FETCH_MIN_INTERVAL_MS) return groupsCache.list;
     if (groupsCache.building) {
         const dead = Date.now() + 8000;
         while (groupsCache.building && Date.now() < dead) await wait(200);
@@ -639,7 +684,8 @@ async function listGroups() {
     }
     groupsCache.building = true;
     try {
-        if (!getClient() || typeof client.groupFetchAllParticipating !== 'function') { groupsCache.building = false; return []; }
+        if (!getClient() || typeof client.groupFetchAllParticipating !== 'function') { groupsCache.building = false; return groupsCache.list || []; }
+        lastGroupsFetchAt = Date.now();
         const data = await client.groupFetchAllParticipating();
         for (const g of Object.values(data || {})) {
             if (g?.id) groupsMetadataCache[g.id] = g;
@@ -648,7 +694,17 @@ async function listGroups() {
         groupsCache = { list: gs, at: Date.now(), building: false };
         if (!gs.length) log('Aviso', 'Nenhum grupo encontrado.');
         return gs;
-    } catch (e) { groupsCache.building = false; throw e; }
+    } catch (e) {
+        groupsCache.building = false;
+        if (groupsCache.list && /rate[-_ ]?overlimit|rate/i.test(errMsg(e))) {
+            if (Date.now() - lastGroupsRateLimitLogAt > GROUPS_RATE_LIMIT_LOG_MS) {
+                lastGroupsRateLimitLogAt = Date.now();
+                log('Aviso', 'Listar grupos limitado pelo WhatsApp; usando cache local', errMsg(e));
+            }
+            return groupsCache.list;
+        }
+        throw e;
+    }
 }
 async function enviarMsg(grupo, mensagem, meta = {}) {
     const origem = meta.origem || 'painel';
@@ -787,7 +843,7 @@ const mcpR = (obj, isError = false) => ({ content: [{ type: 'text', text: JSON.s
 const mcpStatus = () => ({
     connected: botConnected, state: botState, status: botStatus, restarting, engine: 'baileys', timezone: BRASILIA_TZ,
     uptimeSeconds: Math.floor(process.uptime()), startedAt: STARTED_AT.toISOString(),
-    supabaseConfigured: Boolean(supabase), gruposCacheValido: Boolean(groupsCache.list), gruposCacheTotal: groupsCache.list?.length || 0,
+    supabaseConfigured: Boolean(supabase), gruposCacheValido: Boolean(groupsCache.list), gruposCacheTotal: groupsCache.list?.length || 0, gruposCacheAtualizadoEm: groupsCache.at || 0,
     agendamentos: config.agendamentos.length, agendamentosAtivos: config.agendamentos.filter(a => a.ativo).length,
     authDir: AUTH_DIR, lastCredsUpdateAt
 });
@@ -905,7 +961,7 @@ app.get('/api/status', (req, res) => res.json({
     qr: qrDataURL, qrRaw: qrString, pairingCode: lastPairingCode,
     supabaseConfigured: Boolean(supabase), supabaseBucket: SUPABASE_BUCKET, supabaseSessionPath: SUPABASE_SESSION_PATH,
     uptimeSeconds: Math.floor(process.uptime()), startedAt: STARTED_AT.toISOString(),
-    gruposCacheValido: Boolean(groupsCache.list), gruposCacheTotal: groupsCache.list?.length || 0,
+    gruposCacheValido: Boolean(groupsCache.list), gruposCacheTotal: groupsCache.list?.length || 0, gruposCacheAtualizadoEm: groupsCache.at || 0,
 }));
 app.get('/api/config', (req, res) => res.json(config));
 app.post('/api/config', async (req, res) => {
@@ -965,7 +1021,7 @@ app.post('/api/enviar', async (req, res) => {
 app.get('/api/grupos', async (req, res) => {
     res.set('Cache-Control', 'no-store');
     if (!client || !botConnected) return res.json([]);
-    try { res.json(await listGroups()); } catch (e) { log('Erro', 'Listar grupos', errMsg(e)); res.json([]); }
+    try { res.json(await listGroups({ force: req.query.force === '1' })); } catch (e) { log('Erro', 'Listar grupos', errMsg(e)); res.json(groupsCache.list || []); }
 });
 app.post('/api/session/save', async (req, res) => {
     try {

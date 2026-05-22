@@ -59,3 +59,12 @@ Se já havia sessão quebrada, escaneie o QR novamente. A versão antiga restaur
 - Layout reorganizado com grid mais simétrico para logs, agendamentos, envio manual e preview.
 - Mantidos filtros de log por tipo/limite/busca e filtro de agendamentos por múltiplos dias da semana.
 - Mantida rotina de limpeza automática de logs via `LOG_AUTO_CLEAR_HOURS`, padrão 12h.
+
+
+## v13 - ajustes de ruído de log e backup
+
+- Backup automático padrão reduzido para 6h (`SESSION_AUTOSAVE_MS=21600000`).
+- Backup automático só envia para o Supabase se os arquivos da sessão mudaram (`SESSION_BACKUP_ONLY_ON_CHANGE=true`).
+- Eventos `groups.update` não aparecem mais no log por padrão; ative com `DEBUG_GROUP_EVENTS=true` se precisar debugar grupos.
+- Listagem de grupos usa cache de 30 minutos e não chama o WhatsApp a cada 15 segundos.
+- Se o WhatsApp retornar `rate-overlimit` ao listar grupos, o bot usa o cache local e registra no máximo um aviso a cada 10 minutos.

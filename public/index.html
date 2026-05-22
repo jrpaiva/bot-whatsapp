@@ -464,9 +464,10 @@ async function loadConfig() {
   renderAgs();
 }
 
-async function loadGrupos() {
+async function loadGrupos(force = false) {
   try {
-    const r = await fetch('/api/grupos?t=' + Date.now(), { cache: 'no-store' });
+    const qs = force ? '&force=1' : '';
+    const r = await fetch('/api/grupos?t=' + Date.now() + qs, { cache: 'no-store' });
     const data = await r.json();
     grupos = Array.isArray(data)
       ? data
@@ -480,7 +481,7 @@ async function loadGrupos() {
   } catch(e) {
     console.error('Erro ao carregar grupos', e);
   }
-  setTimeout(loadGrupos, 15000);
+  setTimeout(() => loadGrupos(false), 300000);
 }
 
 function findGrupoById(id) {
@@ -977,7 +978,7 @@ async function sessionAction(action) {
     showToast(msg, d.ok ? 'success' : 'error', d.ok ? 3400 : 6500);
 
     if (d.ok) {
-      if (action === 'restart' || action === 'restore') setTimeout(loadGrupos, 6000);
+      if (action === 'restart' || action === 'restore') setTimeout(() => loadGrupos(true), 6000);
       setTimeout(pollStatus, 600);
       setTimeout(pollLogs, 800);
     }
@@ -1048,7 +1049,7 @@ setupModalBackdropClose();
 pollStatus();
 pollLogs();
 loadConfig();
-loadGrupos();
+loadGrupos(false);
 loadPredefinidas();
 updateManualPreview();
 
