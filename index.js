@@ -248,7 +248,7 @@ const buildCron = (horario, dias) => {
 const normAg = ag => {
     const d = ag.diasSemana, h = ag.horario || '12:00';
     const dias = Array.isArray(d) ? d.map(Number).filter(x => x >= 0 && x <= 6).sort() : parseDays('');
-    return { ...ag, grupo: ag.grupo || '', grupoId: ag.grupoId || '', diasSemana: dias, horario: h, cron: ag.cron || buildCron(h, dias) };
+    return { ...ag, grupo: ag.grupo || '', grupoId: ag.grupoId || '', diasSemana: dias, horario: h, cron: buildCron(h, dias) };
 };
 const normCfg = cfg => {
     const base = cfg && typeof cfg === 'object' ? cfg : defaultConfig();
